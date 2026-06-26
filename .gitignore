@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+coverage/
+*.log
+
+# env / secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+.idea/
+*.swp
+
+# Claude Code local overrides (keep shared .claude/, ignore personal)
+.claude/settings.local.json
