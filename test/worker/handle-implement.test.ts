@@ -96,6 +96,9 @@ describe('handleImplement', () => {
     expect(d.github.commitFiles).toHaveBeenCalledTimes(2); // one commit per task
     expect((await store.getRunById(runId))!.state).toBe(RunState.Reviewing);
     expect(sandbox.closed).toBe(1); // sandbox torn down
+    // Review is chained.
+    const next = await store.claimNextJob();
+    expect(next!.type).toBe('review');
   });
 
   it('escalates to a human (Failed) when a task cannot be completed, instead of looping', async () => {

@@ -58,6 +58,31 @@ export interface CommitFilesInput {
   message: string;
 }
 
+export interface CompareDiffInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  /** Head branch/ref being reviewed. */
+  head: string;
+  /** Base to diff against; defaults to the repo's default branch. */
+  base?: string;
+}
+
+export interface OpenPullRequestInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  head: string;
+  base?: string;
+  title: string;
+  body: string;
+}
+
+export interface PullRequestResult {
+  number: number;
+  url: string;
+}
+
 /**
  * The GitHub actions the worker needs. Kept narrow so the worker depends on an
  * interface, not Octokit — tests inject a spy, production injects Probot auth.
@@ -76,6 +101,10 @@ export interface GitHubClient {
   commitFile(input: CommitFileInput): Promise<CommitFileResult>;
   /** Deterministic git write: ensure the branch and commit multiple files in one commit. */
   commitFiles(input: CommitFilesInput): Promise<CommitFileResult>;
+  /** Unified per-file patch text for `base...head` (base defaults to the default branch). */
+  compareDiff(input: CompareDiffInput): Promise<string>;
+  /** Open a PR (or reuse the open one for `head`). Base defaults to the default branch. */
+  openPullRequest(input: OpenPullRequestInput): Promise<PullRequestResult>;
 }
 
 /**
@@ -213,6 +242,36 @@ export function createProbotGitHubClient(probot: Probot): GitHubClient {
 
       await octokit.rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: commit.sha });
       return { commitSha: commit.sha, branch };
+    },
+
+    async compareDiff(input: CompareDiffInput): Promise<string> {
+      const octokit = await probot.auth(input.installationId);
+      const { owner, repo, head } = input;
+      const base = input.base ?? (await octokit.rest.repos.get({ owner, repo })).data.default_branch;
+      const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${base}...${head}`,
+      });
+      return (data.files ?? [])
+        .map((f) => `--- ${f.filename} (${f.status}, +${f.additions}/-${f.deletions})\n${f.patch ?? '(no textual diff)'}`)
+        .join('\n\n');
+    },
+
+    async openPullRequest(input: OpenPullRequestInput): Promise<PullRequestResult> {
+      const octokit = await probot.auth(input.installationId);
+      const { owner, repo, head, title, body } = input;
+      const base = input.base ?? (await octokit.rest.repos.get({ owner, repo })).data.default_branch;
+
+      // Idempotent: reuse an existing open PR for this head branch.
+      const existing = await octokit.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
+      if (existing.data.length > 0) {
+        const pr = existing.data[0]!;
+        return { number: pr.number, url: pr.html_url };
+      }
+
+      const { data: pr } = await octokit.rest.pulls.create({ owner, repo, head, base, title, body });
+      return { number: pr.number, url: pr.html_url };
     },
   };
 }

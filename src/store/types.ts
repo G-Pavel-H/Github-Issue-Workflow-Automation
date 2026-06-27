@@ -39,7 +39,8 @@ export type JobType =
   | 'resume_clarification'
   | 'produce_plan'
   | 'resume_plan_decision'
-  | 'implement';
+  | 'implement'
+  | 'review';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -111,6 +112,14 @@ export interface ImplementPayload {
   issueNumber: number;
 }
 
+/** Payload for a `review` job (Phase 9 reviewer + PR). */
+export interface ReviewPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}
+
 export type JobPayload =
   | IssueOpenedPayload
   | RunTestsPayload
@@ -119,7 +128,8 @@ export type JobPayload =
   | ResumeClarificationPayload
   | ProducePlanPayload
   | ResumePlanDecisionPayload
-  | ImplementPayload;
+  | ImplementPayload
+  | ReviewPayload;
 
 export interface Job {
   id: number;

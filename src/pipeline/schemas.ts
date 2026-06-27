@@ -87,3 +87,17 @@ export const fileSetSchema = z.object({
 });
 export type FileSet = z.infer<typeof fileSetSchema>;
 export type FileEdit = FileSet['files'][number];
+
+/** Reviewer output (Phase 9): a self-review of the change against spec, conventions, security. */
+export const reviewSchema = z.object({
+  verdict: z.enum(['approve', 'request_changes']),
+  summary: z.string(),
+  findings: z.array(
+    z.object({
+      severity: z.enum(['info', 'warning', 'blocker']),
+      note: z.string(),
+      file: z.string().optional(),
+    }),
+  ),
+});
+export type Review = z.infer<typeof reviewSchema>;

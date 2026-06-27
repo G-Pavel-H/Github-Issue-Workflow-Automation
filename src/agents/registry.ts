@@ -5,6 +5,7 @@ import {
   fileSetSchema,
   intakeSchema,
   planSchema,
+  reviewSchema,
   specSchema,
   taskListSchema,
 } from '../pipeline/schemas.js';
@@ -109,6 +110,15 @@ export const ROLES: Record<string, RoleDefinition> = {
     instructionFile: 'refactor.md',
     tier: 'implementation',
     schema: fileSetSchema,
+    maxTokens: 4096,
+  },
+
+  // --- Phase 9 reviewer ---
+  reviewer: {
+    name: 'reviewer',
+    instructionFile: 'reviewer.md',
+    tier: 'review',
+    schema: reviewSchema,
     maxTokens: 4096,
   },
 };

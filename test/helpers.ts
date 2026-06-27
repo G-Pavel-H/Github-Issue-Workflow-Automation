@@ -4,6 +4,7 @@ import type {
   CommitFilesInput,
   GitHubClient,
   IssueInput,
+  OpenPullRequestInput,
   PostIssueCommentInput,
   RepoLanguageInput,
 } from '../src/github/client.js';
@@ -25,6 +26,7 @@ export interface FakeGitHubOpts {
   language?: string | null;
   issueTitle?: string;
   issueBody?: string;
+  diff?: string;
 }
 
 /** A GitHubClient whose methods are spies, with an optional failure mode. */
@@ -36,6 +38,8 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
   getRepoLanguage: ReturnType<typeof vi.fn>;
   commitFile: ReturnType<typeof vi.fn>;
   commitFiles: ReturnType<typeof vi.fn>;
+  compareDiff: ReturnType<typeof vi.fn>;
+  openPullRequest: ReturnType<typeof vi.fn>;
 } {
   const calls: PostIssueCommentInput[] = [];
   const postIssueComment = vi.fn(async (input: PostIssueCommentInput) => {
@@ -59,6 +63,11 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     commitSha: `commit${++commitSeq}`,
     branch: input.branch,
   }));
+  const compareDiff = vi.fn(async () => opts.diff ?? '--- src/x.ts (modified)\n+ added a line');
+  const openPullRequest = vi.fn(async (_input: OpenPullRequestInput) => ({
+    number: 7,
+    url: 'https://github.com/acme/widgets/pull/7',
+  }));
   return {
     calls,
     postIssueComment,
@@ -67,6 +76,8 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     getRepoLanguage,
     commitFile,
     commitFiles,
+    compareDiff,
+    openPullRequest,
   };
 }
 

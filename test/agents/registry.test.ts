@@ -58,4 +58,10 @@ describe('role registry', () => {
       expect(ROLES[name]!.schema, name).toBeDefined();
     }
   });
+
+  it('defines the Phase 9 reviewer role on the review tier', () => {
+    expect(ROLES['reviewer']).toBeDefined();
+    expect(ROLES['reviewer']!.tier).toBe('review');
+    expect(ROLES['reviewer']!.schema).toBeDefined();
+  });
 });

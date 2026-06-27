@@ -13,6 +13,7 @@ import {
   handleProduceSpec,
   handleResumeClarification,
   handleResumePlanDecision,
+  handleReview,
   handleRunTests,
   type CloneFn,
 } from './handlers.js';
@@ -52,6 +53,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'implement':
       await handleImplement(job, deps);
+      return;
+    case 'review':
+      await handleReview(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

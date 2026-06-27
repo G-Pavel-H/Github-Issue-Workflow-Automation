@@ -9,6 +9,7 @@ import {
   type ProduceSpecPayload,
   type ResumeClarificationPayload,
   type ResumePlanDecisionPayload,
+  type ReviewPayload,
   type RunTestsPayload,
   type Store,
 } from '../store/types.js';
@@ -19,7 +20,8 @@ import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
 import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
 import { renderEscalationComment, renderImplementationDoneComment } from '../pipeline/implement.js';
-import type { Clarification, IntakeResult, Plan, Spec } from '../pipeline/schemas.js';
+import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
+import type { Clarification, IntakeResult, Plan, Review, Spec } from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
 import {
   CLARIFY_QUESTION_CAP,
@@ -38,7 +40,13 @@ import {
   renderPlanMarkdown,
   renderPlanRevisionCapComment,
 } from '../pipeline/plan.js';
-import { commitPlan, commitSpec, commitTaskFiles, specBranch } from '../github/integrator.js';
+import {
+  commitPlan,
+  commitSpec,
+  commitTaskFiles,
+  openPullRequestForIssue,
+  specBranch,
+} from '../github/integrator.js';
 import {
   DEFAULT_TOP_K,
   namespaceFor,
@@ -893,7 +901,8 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
       body: renderImplementationDoneComment(tasks.length),
     });
     await store.updateRunState(run.id, RunState.Reviewing);
-    log.info({ runId: run.id, repo: repoLabel, tasks: tasks.length }, 'Implementation complete');
+    await store.enqueueJob({ type: 'review', payload: { installationId, owner, repo, issueNumber } });
+    log.info({ runId: run.id, repo: repoLabel, tasks: tasks.length }, 'Implementation complete; enqueued review');
   } catch (err) {
     if (err instanceof BudgetExhaustedError) {
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
@@ -904,6 +913,88 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
     throw err;
   } finally {
     await sandbox.close();
+  }
+}
+
+/**
+ * Handle a `review` job (Phase 9): the Reviewer (Opus) self-reviews the change (spec + plan +
+ * diff), then the deterministic Integrator opens the PR — summarizing spec/plan/assumptions and
+ * the review, linking the issue. The review is advisory (recorded for the audit trail); opening
+ * the PR is the MVP heartbeat. No agent performs git/PR writes.
+ *
+ * Idempotent: only runs from `Reviewing`; the PR open itself is idempotent on the head branch.
+ * Budget-aware.
+ */
+export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<void> {
+  const { store, github, gateway, log } = deps;
+  const { installationId, owner, repo, issueNumber } = job.payload as ReviewPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.Reviewing) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not reviewing; skipping');
+    return;
+  }
+
+  const [specArtifact, planArtifact] = [
+    await store.getArtifact(run.id, 'spec'),
+    await store.getArtifact(run.id, 'plan'),
+  ];
+  const { spec: meta, specData, planData } = readRunContext(run.context);
+  if (!specArtifact || !planArtifact || !specData || !planData) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'review without spec/plan; skipping');
+    return;
+  }
+
+  const ctx = { runId: run.id, gateway, log };
+
+  try {
+    const diff = await github.compareDiff({ installationId, owner, repo, head: specBranch(issueNumber) });
+
+    const review = await runAgent<Review>(
+      'reviewer',
+      {
+        messages: [
+          {
+            role: 'user',
+            content: `Spec:\n${specArtifact.content}\n\nPlan:\n${planArtifact.content}\n\nDiff:\n${diff}`,
+          },
+        ],
+      },
+      ctx,
+    );
+
+    const pr = await openPullRequestForIssue(github, {
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      title: renderPrTitle({ title: meta.title ?? `Issue #${issueNumber}` }, issueNumber),
+      body: renderPrBody({ spec: specData, plan: planData, review: review.output!, issueNumber }),
+    });
+
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderReviewedComment(pr.url, review.output!),
+    });
+
+    await store.updateRunState(run.id, RunState.AwaitingPrReview);
+    log.info({ runId: run.id, repo: repoLabel, pr: pr.number }, 'Opened PR; awaiting human review');
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during review');
+      return;
+    }
+    throw err;
   }
 }
 

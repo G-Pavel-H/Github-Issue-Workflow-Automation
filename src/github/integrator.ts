@@ -1,4 +1,4 @@
-import type { CommitFileResult, GitHubClient } from './client.js';
+import type { CommitFileResult, GitHubClient, PullRequestResult } from './client.js';
 
 /**
  * The deterministic Integrator (Phase 4 embryo). All git writes go through here —
@@ -99,5 +99,29 @@ export async function commitTaskFiles(
     branch: specBranch(input.issueNumber),
     files: input.files,
     message: input.message,
+  });
+}
+
+export interface OpenPrInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  title: string;
+  body: string;
+}
+
+/** Open (or reuse) the PR for an issue's working branch (Phase 9). Deterministic — no agent. */
+export async function openPullRequestForIssue(
+  github: GitHubClient,
+  input: OpenPrInput,
+): Promise<PullRequestResult> {
+  return github.openPullRequest({
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+    head: specBranch(input.issueNumber),
+    title: input.title,
+    body: input.body,
   });
 }
