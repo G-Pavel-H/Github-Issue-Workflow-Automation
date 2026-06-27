@@ -199,15 +199,17 @@ These apply to **every** phase. They are not optional.
 **Goal:** Give downstream agents scoped code context instead of whole files.
 
 **Build:**
-- Stand up CocoIndex against the target repo: AST-aware chunking, embeddings into pgvector, incremental updates.
+- Stand up CocoIndex against the target repo: AST-aware chunking, embeddings into pgvector (per-run).
 - A `retrieve(query, scope)` service the agents call, returning ranked code chunks.
-- Re-index incrementally as the agent edits files within a run.
+- ~~Re-index incrementally as the agent edits files within a run.~~ **Deferred (post-MVP).** See note.
 
 **Exit criteria:**
 - Indexing the test repo produces queryable chunks; a natural-language query returns relevant, complete (non-fragmented) code units.
-- Editing one file re-embeds only the changed chunks (verify incremental behavior).
+- ~~Editing one file re-embeds only the changed chunks (verify incremental behavior).~~ → **Deferred (post-MVP).** Replaced for the MVP by: chunks are namespaced per run and torn down at run end (no cross-repo leakage; clean teardown).
 
 **Notes:** Placed here because the Architect is the first heavy consumer. Keep retrieval per-agent scoped — it's a cost control, not only a quality one.
+
+**2026-06-27 decision (Phase 6 scope):** The code index is **per-run** — clone → CocoIndex AST-chunks + embeds (with a **local, in-process** model, no API key) into pgvector namespaced per repo/run → agents query during the run → vectors + checkout torn down after. **No incrementality, no persistent checkout, no tracking tables** (incremental re-embedding is post-MVP). CocoIndex stays the locked engine, behind a `CodeIndex` interface; ingestion is a gated integration (verified locally/in the demo, like E2B), retrieval is a pgvector ANN query owned in TS and run in CI.
 
 ### Phase 7 — Architect & plan gate (Definition of Ready)
 

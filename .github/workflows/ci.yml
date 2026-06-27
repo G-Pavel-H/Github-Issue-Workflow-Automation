@@ -12,7 +12,9 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # pgvector-enabled image so migration 006 (CREATE EXTENSION vector) and the
+        # code-index retrieval integration tests run in CI.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

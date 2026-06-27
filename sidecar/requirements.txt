@@ -1,0 +1,4 @@
+# Tsukinome code-index sidecar (Phase 6). Install into a venv where the worker can
+# reach `python3`:  python3 -m venv .venv && .venv/bin/pip install -r sidecar/requirements.txt
+cocoindex
+sentence-transformers
