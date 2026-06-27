@@ -1,10 +1,13 @@
 import type { Pool, QueryResultRow } from 'pg';
 import type {
+  Artifact,
+  ArtifactKind,
   FindOrCreateRunResult,
   Job,
   JobPayload,
   JobType,
   LlmCall,
+  RecordArtifactInput,
   RecordLlmCallInput,
   RecordLlmCallResult,
   RecordTestRunInput,
@@ -36,6 +39,17 @@ function mapTestRun(row: QueryResultRow): TestRun {
     command: row.command,
     failureStage: (row.failure_stage as TestFailureStage | null) ?? undefined,
     outputTail: row.output_tail ?? '',
+  };
+}
+
+function mapArtifact(row: QueryResultRow): Artifact {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    kind: row.kind as ArtifactKind,
+    path: row.path,
+    content: row.content,
+    commitSha: row.commit_sha ?? null,
   };
 }
 
@@ -244,5 +258,27 @@ export class PgStore implements Store {
       [runId],
     );
     return rows.map(mapLlmCall);
+  }
+
+  async recordArtifact(input: RecordArtifactInput): Promise<Artifact> {
+    const { rows } = await this.pool.query(
+      `INSERT INTO artifacts (run_id, kind, path, content, commit_sha)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (run_id, kind)
+       DO UPDATE SET path = EXCLUDED.path, content = EXCLUDED.content,
+                     commit_sha = EXCLUDED.commit_sha, created_at = now()
+       RETURNING id, run_id, kind, path, content, commit_sha`,
+      [input.runId, input.kind, input.path, input.content, input.commitSha ?? null],
+    );
+    return mapArtifact(rows[0]!);
+  }
+
+  async getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null> {
+    const { rows } = await this.pool.query(
+      `SELECT id, run_id, kind, path, content, commit_sha
+         FROM artifacts WHERE run_id = $1 AND kind = $2`,
+      [runId, kind],
+    );
+    return rows[0] ? mapArtifact(rows[0]) : null;
   }
 }

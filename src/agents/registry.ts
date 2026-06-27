@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { intakeSchema, specSchema } from '../pipeline/schemas.js';
 import type { RoleDefinition, ToolDefinition } from './types.js';
 
 export { TIER_MODELS } from '../llm/models.js';
@@ -38,5 +39,21 @@ export const ROLES: Record<string, RoleDefinition> = {
     tools: [pingTool],
     maxToolRounds: 3,
     maxTokens: 512,
+  },
+
+  // --- Phase 4 pipeline roles ---
+  intake: {
+    name: 'intake',
+    instructionFile: 'intake.md',
+    tier: 'triage',
+    schema: intakeSchema,
+    maxTokens: 1024,
+  },
+  'product-owner': {
+    name: 'product-owner',
+    instructionFile: 'product-owner.md',
+    tier: 'review',
+    schema: specSchema,
+    maxTokens: 4096,
   },
 };

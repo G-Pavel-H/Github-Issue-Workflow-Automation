@@ -28,4 +28,14 @@ describe('role registry', () => {
     expect(role.tools?.map((t) => t.spec.name)).toContain('ping');
     expect(role.maxToolRounds).toBeGreaterThan(0);
   });
+
+  it('defines the Phase 4 pipeline roles on the expected tiers', () => {
+    expect(ROLES['intake']).toBeDefined();
+    expect(ROLES['intake']!.tier).toBe('triage');
+    expect(ROLES['intake']!.schema).toBeDefined();
+
+    expect(ROLES['product-owner']).toBeDefined();
+    expect(ROLES['product-owner']!.tier).toBe('review');
+    expect(ROLES['product-owner']!.schema).toBeDefined();
+  });
 });

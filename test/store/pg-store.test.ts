@@ -34,7 +34,7 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
 
   beforeEach(async () => {
     await pool.query(
-      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls RESTART IDENTITY CASCADE',
+      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls, artifacts RESTART IDENTITY CASCADE',
     );
   });
 
@@ -111,6 +111,27 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
     expect(second.budgetRemainingNanoUsd).toBe(-300_000);
     expect((await store.getRunById(run.id))!.spentNanoUsd).toBe(2_300_000);
     expect(await store.getLlmCalls(run.id)).toHaveLength(2);
+  });
+
+  it('upserts an artifact on (run_id, kind)', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.recordArtifact({
+      runId: run.id,
+      kind: 'spec',
+      path: '.tsukinome/42/spec.md',
+      content: '# v1',
+      commitSha: 'aaa',
+    });
+    await store.recordArtifact({
+      runId: run.id,
+      kind: 'spec',
+      path: '.tsukinome/42/spec.md',
+      content: '# v2',
+      commitSha: 'bbb',
+    });
+    const artifact = await store.getArtifact(run.id, 'spec');
+    expect(artifact!.content).toBe('# v2');
+    expect(artifact!.commitSha).toBe('bbb');
   });
 
   it('records and lists test runs against a run', async () => {

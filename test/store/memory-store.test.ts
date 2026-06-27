@@ -135,6 +135,36 @@ describe('InMemoryStore — llm calls & budget', () => {
   });
 });
 
+describe('InMemoryStore — artifacts', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('records an artifact and reads it back; re-record upserts on (run, kind)', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.recordArtifact({
+      runId: run.id,
+      kind: 'spec',
+      path: '.tsukinome/42/spec.md',
+      content: '# Spec v1',
+      commitSha: 'aaa',
+    });
+    await store.recordArtifact({
+      runId: run.id,
+      kind: 'spec',
+      path: '.tsukinome/42/spec.md',
+      content: '# Spec v2',
+      commitSha: 'bbb',
+    });
+
+    const artifact = await store.getArtifact(run.id, 'spec');
+    expect(artifact!.content).toBe('# Spec v2');
+    expect(artifact!.commitSha).toBe('bbb');
+    expect(await store.getArtifact(run.id, 'plan')).toBeNull();
+  });
+});
+
 describe('InMemoryStore — processed events', () => {
   let store: InMemoryStore;
   beforeEach(() => {

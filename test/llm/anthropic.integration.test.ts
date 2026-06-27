@@ -86,4 +86,41 @@ describe.skipIf(!KEY || !DB)('Anthropic integration', () => {
     expect(typeof (result.output as { echoed: string }).echoed).toBe('string');
     expect((await store.getLlmCalls(runId)).length).toBeGreaterThanOrEqual(1);
   }, 60_000);
+
+  it('produces a confidence-tagged spec via the intake + product-owner roles', async () => {
+    const runId = await newRun();
+    const ctx = { runId, gateway, log: silentLog };
+    const issue =
+      'Title: Add a dark mode toggle\n\n' +
+      'Body: Users have asked for a dark theme. Add a toggle in settings that switches ' +
+      'the UI between light and dark and remembers the choice.';
+
+    const intake = await runAgent<{ classification: string; problemStatement: string }>(
+      'intake',
+      { messages: [{ role: 'user', content: issue }] },
+      ctx,
+    );
+    expect(['feature', 'bug', 'refactor', 'chore']).toContain(intake.output!.classification);
+
+    const spec = await runAgent<{
+      requirements: { confidence: string }[];
+      acceptanceCriteria: { given: string; when: string; then: string }[];
+      assumptions: string[];
+    }>(
+      'product-owner',
+      { messages: [{ role: 'user', content: `Problem: ${intake.output!.problemStatement}\n\n${issue}` }] },
+      ctx,
+    );
+    expect(spec.output!.requirements.length).toBeGreaterThan(0);
+    expect(['explicit', 'inferred', 'assumption', 'unknown']).toContain(
+      spec.output!.requirements[0]!.confidence,
+    );
+    expect(spec.output!.acceptanceCriteria[0]!.given).toBeTruthy();
+
+    // Cost logged and within the run budget.
+    const run = await store.getRunById(runId);
+    expect(run!.spentNanoUsd).toBeGreaterThan(0);
+    expect(run!.spentNanoUsd).toBeLessThan(run!.budgetNanoUsd);
+    expect((await store.getLlmCalls(runId)).length).toBe(2);
+  }, 90_000);
 });

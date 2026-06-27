@@ -2,12 +2,14 @@ import type { GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
 import type { Job, Store } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
-import { handleIssueOpened, handleRunTests } from './handlers.js';
+import type { LlmGateway } from '../llm/gateway.js';
+import { handleIssueOpened, handleProduceSpec, handleRunTests } from './handlers.js';
 
 export interface WorkerDeps {
   store: Store;
   github: GitHubClient;
   sandboxProvider: SandboxProvider;
+  gateway: LlmGateway;
   log: Logger;
 }
 
@@ -17,6 +19,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
   switch (job.type) {
     case 'issue_opened':
       await handleIssueOpened(job, deps);
+      return;
+    case 'produce_spec':
+      await handleProduceSpec(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

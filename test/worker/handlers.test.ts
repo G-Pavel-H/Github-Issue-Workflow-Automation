@@ -41,6 +41,20 @@ describe('handleIssueOpened', () => {
     expect(run!.state).toBe(RunState.Acknowledged);
   });
 
+  it('enqueues a produce_spec job after acknowledging', async () => {
+    const github = fakeGitHub();
+    await handleIssueOpened(job, { store, github, log: silentLog });
+
+    const next = await store.claimNextJob();
+    expect(next!.type).toBe('produce_spec');
+    expect(next!.payload).toMatchObject({
+      installationId: 7,
+      owner: 'acme',
+      repo: 'widgets',
+      issueNumber: 42,
+    });
+  });
+
   it('does not post a second comment when the same job is reprocessed (idempotency)', async () => {
     const github = fakeGitHub();
     await handleIssueOpened(job, { store, github, log: silentLog });

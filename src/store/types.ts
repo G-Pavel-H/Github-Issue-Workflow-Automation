@@ -10,6 +10,8 @@ export const RunState = {
   Acknowledged: 'acknowledged',
   Triaging: 'triaging',
   Specifying: 'specifying',
+  Specified: 'specified',
+  Unsupported: 'unsupported',
   AwaitingClarification: 'awaiting_clarification',
   Planning: 'planning',
   AwaitingPlanApproval: 'awaiting_plan_approval',
@@ -29,7 +31,7 @@ export type RunState = (typeof RunState)[keyof typeof RunState];
 export type JobStatus = 'queued' | 'in_progress' | 'done' | 'failed';
 
 /** Job types grow with the pipeline. */
-export type JobType = 'issue_opened' | 'run_tests';
+export type JobType = 'issue_opened' | 'run_tests' | 'produce_spec';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -49,7 +51,15 @@ export interface RunTestsPayload {
   issueNumber: number;
 }
 
-export type JobPayload = IssueOpenedPayload | RunTestsPayload;
+/** Payload for a `produce_spec` job (Phase 4 intake → spec pipeline). */
+export interface ProduceSpecPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}
+
+export type JobPayload = IssueOpenedPayload | RunTestsPayload | ProduceSpecPayload;
 
 export interface Job {
   id: number;
@@ -125,6 +135,21 @@ export interface RecordLlmCallResult {
   budgetRemainingNanoUsd: number;
 }
 
+/** A committed artifact (e.g. the spec) — the source of truth, re-read by later phases. */
+export type ArtifactKind = 'spec' | 'plan';
+
+export interface RecordArtifactInput {
+  runId: number;
+  kind: ArtifactKind;
+  path: string;
+  content: string;
+  commitSha?: string | null;
+}
+
+export interface Artifact extends RecordArtifactInput {
+  id: number;
+}
+
 /**
  * Persistence boundary for the queue, runs, and webhook dedupe. Two
  * implementations: PgStore (production) and InMemoryStore (tests / no-DB dev).
@@ -147,4 +172,7 @@ export interface Store {
   /** Insert an llm_calls row and atomically add its cost to the run's spend. */
   recordLlmCall(input: RecordLlmCallInput): Promise<RecordLlmCallResult>;
   getLlmCalls(runId: number): Promise<LlmCall[]>;
+  /** Upsert an artifact keyed by (runId, kind). */
+  recordArtifact(input: RecordArtifactInput): Promise<Artifact>;
+  getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null>;
 }

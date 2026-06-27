@@ -1,10 +1,13 @@
 import {
   DEFAULT_RUN_BUDGET_NANO_USD,
+  type Artifact,
+  type ArtifactKind,
   type FindOrCreateRunResult,
   type Job,
   type JobPayload,
   type JobType,
   type LlmCall,
+  type RecordArtifactInput,
   type RecordLlmCallInput,
   type RecordLlmCallResult,
   type RecordTestRunInput,
@@ -29,10 +32,12 @@ export class InMemoryStore implements Store {
   private processedEvents = new Set<string>();
   private testRuns: TestRun[] = [];
   private llmCalls: LlmCall[] = [];
+  private artifacts: Artifact[] = [];
   private nextJobId = 1;
   private nextRunId = 1;
   private nextTestRunId = 1;
   private nextLlmCallId = 1;
+  private nextArtifactId = 1;
 
   async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
     const job: Job = {
@@ -142,6 +147,26 @@ export class InMemoryStore implements Store {
 
   async getLlmCalls(runId: number): Promise<LlmCall[]> {
     return this.llmCalls.filter((c) => c.runId === runId).map((c) => ({ ...c }));
+  }
+
+  async recordArtifact(input: RecordArtifactInput): Promise<Artifact> {
+    const existing = this.artifacts.find((a) => a.runId === input.runId && a.kind === input.kind);
+    if (existing) {
+      Object.assign(existing, {
+        path: input.path,
+        content: input.content,
+        commitSha: input.commitSha ?? null,
+      });
+      return { ...existing };
+    }
+    const artifact: Artifact = { id: this.nextArtifactId++, ...input, commitSha: input.commitSha ?? null };
+    this.artifacts.push(artifact);
+    return { ...artifact };
+  }
+
+  async getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null> {
+    const artifact = this.artifacts.find((a) => a.runId === runId && a.kind === kind);
+    return artifact ? { ...artifact } : null;
   }
 
   /** Test-only inspection helper (not part of the Store contract). */
