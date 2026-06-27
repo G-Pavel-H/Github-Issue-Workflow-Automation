@@ -4,6 +4,9 @@ import type {
   Job,
   JobPayload,
   JobType,
+  LlmCall,
+  RecordLlmCallInput,
+  RecordLlmCallResult,
   RecordTestRunInput,
   Run,
   RunKey,
@@ -45,6 +48,22 @@ function mapRun(row: QueryResultRow): Run {
     issueNumber: Number(row.issue_number),
     state: row.state as RunState,
     context: (row.context as Record<string, unknown>) ?? {},
+    budgetNanoUsd: Number(row.budget_nano_usd),
+    spentNanoUsd: Number(row.spent_nano_usd),
+  };
+}
+
+function mapLlmCall(row: QueryResultRow): LlmCall {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    role: row.role,
+    model: row.model,
+    inputTokens: Number(row.input_tokens),
+    outputTokens: Number(row.output_tokens),
+    cacheCreationTokens: Number(row.cache_creation_tokens),
+    cacheReadTokens: Number(row.cache_read_tokens),
+    costNanoUsd: Number(row.cost_nano_usd),
   };
 }
 
@@ -97,7 +116,8 @@ export class PgStore implements Store {
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (installation_id, owner, repo, issue_number)
        DO UPDATE SET updated_at = now()
-       RETURNING id, installation_id, owner, repo, issue_number, state, context, (xmax = 0) AS created`,
+       RETURNING id, installation_id, owner, repo, issue_number, state, context,
+                 budget_nano_usd, spent_nano_usd, (xmax = 0) AS created`,
       [key.installationId, key.owner, key.repo, key.issueNumber, initialState],
     );
     const row = rows[0]!;
@@ -113,12 +133,30 @@ export class PgStore implements Store {
 
   async getRun(key: RunKey): Promise<Run | null> {
     const { rows } = await this.pool.query(
-      `SELECT id, installation_id, owner, repo, issue_number, state, context
+      `SELECT id, installation_id, owner, repo, issue_number, state, context,
+              budget_nano_usd, spent_nano_usd
          FROM runs
         WHERE installation_id = $1 AND owner = $2 AND repo = $3 AND issue_number = $4`,
       [key.installationId, key.owner, key.repo, key.issueNumber],
     );
     return rows[0] ? mapRun(rows[0]) : null;
+  }
+
+  async getRunById(runId: number): Promise<Run | null> {
+    const { rows } = await this.pool.query(
+      `SELECT id, installation_id, owner, repo, issue_number, state, context,
+              budget_nano_usd, spent_nano_usd
+         FROM runs WHERE id = $1`,
+      [runId],
+    );
+    return rows[0] ? mapRun(rows[0]) : null;
+  }
+
+  async setRunBudget(runId: number, budgetNanoUsd: number): Promise<void> {
+    await this.pool.query(`UPDATE runs SET budget_nano_usd = $2, updated_at = now() WHERE id = $1`, [
+      runId,
+      budgetNanoUsd,
+    ]);
   }
 
   async tryMarkEventProcessed(deliveryId: string): Promise<boolean> {
@@ -156,5 +194,55 @@ export class PgStore implements Store {
       [runId],
     );
     return rows.map(mapTestRun);
+  }
+
+  async recordLlmCall(input: RecordLlmCallInput): Promise<RecordLlmCallResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `INSERT INTO llm_calls
+           (run_id, role, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_nano_usd)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, run_id, role, model, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens, cost_nano_usd`,
+        [
+          input.runId,
+          input.role,
+          input.model,
+          input.inputTokens,
+          input.outputTokens,
+          input.cacheCreationTokens,
+          input.cacheReadTokens,
+          input.costNanoUsd,
+        ],
+      );
+      const { rows: runRows } = await client.query(
+        `UPDATE runs SET spent_nano_usd = spent_nano_usd + $2, updated_at = now()
+          WHERE id = $1
+        RETURNING (budget_nano_usd - spent_nano_usd) AS remaining`,
+        [input.runId, input.costNanoUsd],
+      );
+      await client.query('COMMIT');
+      return {
+        call: mapLlmCall(rows[0]!),
+        budgetRemainingNanoUsd: Number(runRows[0]!.remaining),
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getLlmCalls(runId: number): Promise<LlmCall[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, run_id, role, model, input_tokens, output_tokens,
+              cache_creation_tokens, cache_read_tokens, cost_nano_usd
+         FROM llm_calls WHERE run_id = $1 ORDER BY id`,
+      [runId],
+    );
+    return rows.map(mapLlmCall);
   }
 }

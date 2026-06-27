@@ -33,7 +33,9 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
   });
 
   beforeEach(async () => {
-    await pool.query('TRUNCATE jobs, runs, processed_events, test_runs RESTART IDENTITY CASCADE');
+    await pool.query(
+      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls RESTART IDENTITY CASCADE',
+    );
   });
 
   afterAll(async () => {
@@ -77,6 +79,38 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
   it('dedupes processed events by delivery id', async () => {
     expect(await store.tryMarkEventProcessed('x-1')).toBe(true);
     expect(await store.tryMarkEventProcessed('x-1')).toBe(false);
+  });
+
+  it('records an llm call and atomically decrements the run budget', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.setRunBudget(run.id, 2_000_000);
+
+    const first = await store.recordLlmCall({
+      runId: run.id,
+      role: 'review',
+      model: 'claude-opus-4-8',
+      inputTokens: 100,
+      outputTokens: 40,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costNanoUsd: 1_500_000,
+    });
+    expect(first.budgetRemainingNanoUsd).toBe(500_000);
+
+    const second = await store.recordLlmCall({
+      runId: run.id,
+      role: 'review',
+      model: 'claude-opus-4-8',
+      inputTokens: 10,
+      outputTokens: 10,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costNanoUsd: 800_000,
+    });
+    // Overspend goes negative — the gateway refuses the *next* call.
+    expect(second.budgetRemainingNanoUsd).toBe(-300_000);
+    expect((await store.getRunById(run.id))!.spentNanoUsd).toBe(2_300_000);
+    expect(await store.getLlmCalls(run.id)).toHaveLength(2);
   });
 
   it('records and lists test runs against a run', async () => {

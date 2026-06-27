@@ -1,14 +1,18 @@
-import type {
-  FindOrCreateRunResult,
-  Job,
-  JobPayload,
-  JobType,
-  RecordTestRunInput,
-  Run,
-  RunKey,
-  RunState,
-  Store,
-  TestRun,
+import {
+  DEFAULT_RUN_BUDGET_NANO_USD,
+  type FindOrCreateRunResult,
+  type Job,
+  type JobPayload,
+  type JobType,
+  type LlmCall,
+  type RecordLlmCallInput,
+  type RecordLlmCallResult,
+  type RecordTestRunInput,
+  type Run,
+  type RunKey,
+  type RunState,
+  type Store,
+  type TestRun,
 } from './types.js';
 
 function runKeyOf(key: RunKey): string {
@@ -24,9 +28,11 @@ export class InMemoryStore implements Store {
   private runs = new Map<string, Run>();
   private processedEvents = new Set<string>();
   private testRuns: TestRun[] = [];
+  private llmCalls: LlmCall[] = [];
   private nextJobId = 1;
   private nextRunId = 1;
   private nextTestRunId = 1;
+  private nextLlmCallId = 1;
 
   async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
     const job: Job = {
@@ -73,6 +79,8 @@ export class InMemoryStore implements Store {
       issueNumber: key.issueNumber,
       state: initialState,
       context: {},
+      budgetNanoUsd: DEFAULT_RUN_BUDGET_NANO_USD,
+      spentNanoUsd: 0,
     };
     this.runs.set(k, run);
     return { run: { ...run }, created: true };
@@ -92,6 +100,21 @@ export class InMemoryStore implements Store {
     return run ? { ...run } : null;
   }
 
+  private findRunById(runId: number): Run | undefined {
+    for (const run of this.runs.values()) if (run.id === runId) return run;
+    return undefined;
+  }
+
+  async getRunById(runId: number): Promise<Run | null> {
+    const run = this.findRunById(runId);
+    return run ? { ...run } : null;
+  }
+
+  async setRunBudget(runId: number, budgetNanoUsd: number): Promise<void> {
+    const run = this.findRunById(runId);
+    if (run) run.budgetNanoUsd = budgetNanoUsd;
+  }
+
   async tryMarkEventProcessed(deliveryId: string): Promise<boolean> {
     if (this.processedEvents.has(deliveryId)) return false;
     this.processedEvents.add(deliveryId);
@@ -106,6 +129,19 @@ export class InMemoryStore implements Store {
 
   async getTestRuns(runId: number): Promise<TestRun[]> {
     return this.testRuns.filter((t) => t.runId === runId).map((t) => ({ ...t }));
+  }
+
+  async recordLlmCall(input: RecordLlmCallInput): Promise<RecordLlmCallResult> {
+    const call: LlmCall = { id: this.nextLlmCallId++, ...input };
+    this.llmCalls.push(call);
+    const run = this.findRunById(input.runId);
+    if (!run) throw new Error(`Run ${input.runId} not found`);
+    run.spentNanoUsd += input.costNanoUsd;
+    return { call: { ...call }, budgetRemainingNanoUsd: run.budgetNanoUsd - run.spentNanoUsd };
+  }
+
+  async getLlmCalls(runId: number): Promise<LlmCall[]> {
+    return this.llmCalls.filter((c) => c.runId === runId).map((c) => ({ ...c }));
   }
 
   /** Test-only inspection helper (not part of the Store contract). */

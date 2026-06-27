@@ -107,6 +107,34 @@ describe('InMemoryStore — test runs', () => {
   });
 });
 
+describe('InMemoryStore — llm calls & budget', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('records an llm call and atomically decrements the run budget', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.setRunBudget(run.id, 1_000_000);
+
+    const { call, budgetRemainingNanoUsd } = await store.recordLlmCall({
+      runId: run.id,
+      role: 'triage',
+      model: 'claude-haiku-4-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costNanoUsd: 350_000,
+    });
+
+    expect(call.id).toBeGreaterThan(0);
+    expect(budgetRemainingNanoUsd).toBe(1_000_000 - 350_000);
+    expect((await store.getRunById(run.id))!.spentNanoUsd).toBe(350_000);
+    expect(await store.getLlmCalls(run.id)).toHaveLength(1);
+  });
+});
+
 describe('InMemoryStore — processed events', () => {
   let store: InMemoryStore;
   beforeEach(() => {

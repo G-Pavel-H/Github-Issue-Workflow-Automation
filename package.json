@@ -20,11 +20,13 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.106.0",
     "dotenv": "^17.4.2",
     "e2b": "^2.31.0",
     "node-pg-migrate": "^8.0.4",
     "pg": "^8.22.0",
-    "probot": "^14.3.2"
+    "probot": "^14.3.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

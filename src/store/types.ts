@@ -67,7 +67,14 @@ export interface Run {
   issueNumber: number;
   state: RunState;
   context: Record<string, unknown>;
+  /** Per-run budget ceiling in nano-USD (1e-9 USD). */
+  budgetNanoUsd: number;
+  /** Cumulative model spend in nano-USD. */
+  spentNanoUsd: number;
 }
+
+/** Default per-run budget: $1.00. Overridable via config / setRunBudget. */
+export const DEFAULT_RUN_BUDGET_NANO_USD = 1_000_000_000;
 
 /** Identifies the one run that belongs to a given issue. */
 export interface RunKey {
@@ -97,6 +104,27 @@ export interface TestRun extends RecordTestRunInput {
   id: number;
 }
 
+export interface RecordLlmCallInput {
+  runId: number;
+  role: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  costNanoUsd: number;
+}
+
+export interface LlmCall extends RecordLlmCallInput {
+  id: number;
+}
+
+export interface RecordLlmCallResult {
+  call: LlmCall;
+  /** Budget remaining after this call (may be negative on overspend). */
+  budgetRemainingNanoUsd: number;
+}
+
 /**
  * Persistence boundary for the queue, runs, and webhook dedupe. Two
  * implementations: PgStore (production) and InMemoryStore (tests / no-DB dev).
@@ -110,8 +138,13 @@ export interface Store {
   findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult>;
   updateRunState(runId: number, state: RunState): Promise<void>;
   getRun(key: RunKey): Promise<Run | null>;
+  getRunById(runId: number): Promise<Run | null>;
+  setRunBudget(runId: number, budgetNanoUsd: number): Promise<void>;
   /** Returns true if the delivery id was newly recorded, false if already seen. */
   tryMarkEventProcessed(deliveryId: string): Promise<boolean>;
   recordTestRun(input: RecordTestRunInput): Promise<TestRun>;
   getTestRuns(runId: number): Promise<TestRun[]>;
+  /** Insert an llm_calls row and atomically add its cost to the run's spend. */
+  recordLlmCall(input: RecordLlmCallInput): Promise<RecordLlmCallResult>;
+  getLlmCalls(runId: number): Promise<LlmCall[]>;
 }
