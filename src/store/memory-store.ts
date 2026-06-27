@@ -100,6 +100,11 @@ export class InMemoryStore implements Store {
     }
   }
 
+  async updateRunContext(runId: number, context: Record<string, unknown>): Promise<void> {
+    const run = this.findRunById(runId);
+    if (run) run.context = { ...context };
+  }
+
   async getRun(key: RunKey): Promise<Run | null> {
     const run = this.runs.get(runKeyOf(key));
     return run ? { ...run } : null;

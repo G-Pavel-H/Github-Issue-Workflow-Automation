@@ -67,12 +67,17 @@ describe('handleProduceSpec', () => {
     expect(github.postIssueComment).toHaveBeenCalledTimes(1);
     expect(github.calls[0]!.body.toLowerCase()).toContain('assumptions i');
 
-    // Artifact + cost persisted; run advanced.
+    // Artifact + cost persisted; run advanced to Specifying (clarification gate is next).
     const run = await store.getRun(job.payload);
-    expect(run!.state).toBe(RunState.Specified);
+    expect(run!.state).toBe(RunState.Specifying);
     const artifact = await store.getArtifact(run!.id, 'spec');
     expect(artifact!.path).toBe('.tsukinome/42/spec.md');
     expect((await store.getLlmCalls(run!.id)).length).toBe(2);
+
+    // A `clarify` job is chained to run the clarification gate.
+    const clarifyJob = await store.claimNextJob();
+    expect(clarifyJob!.type).toBe('clarify');
+    expect(clarifyJob!.payload).toMatchObject({ owner: 'acme', repo: 'widgets', issueNumber: 42 });
   });
 
   it('is idempotent — a second run does no LLM, commit, or comment', async () => {

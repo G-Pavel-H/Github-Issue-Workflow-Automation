@@ -3,7 +3,13 @@ import type { Logger } from '../log.js';
 import type { Job, Store } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
-import { handleIssueOpened, handleProduceSpec, handleRunTests } from './handlers.js';
+import {
+  handleClarify,
+  handleIssueOpened,
+  handleProduceSpec,
+  handleResumeClarification,
+  handleRunTests,
+} from './handlers.js';
 
 export interface WorkerDeps {
   store: Store;
@@ -22,6 +28,12 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'produce_spec':
       await handleProduceSpec(job, deps);
+      return;
+    case 'clarify':
+      await handleClarify(job, deps);
+      return;
+    case 'resume_clarification':
+      await handleResumeClarification(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

@@ -2,8 +2,10 @@ import type { GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
 import {
   RunState,
+  type ClarifyPayload,
   type Job,
   type ProduceSpecPayload,
+  type ResumeClarificationPayload,
   type RunTestsPayload,
   type Store,
 } from '../store/types.js';
@@ -11,8 +13,14 @@ import type { SandboxProvider } from '../sandbox/types.js';
 import { runTests } from '../sandbox/run-tests.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
-import type { IntakeResult, Spec } from '../pipeline/schemas.js';
+import type { Clarification, IntakeResult, Spec } from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
+import {
+  CLARIFY_QUESTION_CAP,
+  renderClarificationComment,
+  renderSpecUpdatedComment,
+  renderTooUnderspecifiedComment,
+} from '../pipeline/clarify.js';
 import { commitSpec } from '../github/integrator.js';
 
 export interface HandlerDeps {
@@ -189,10 +197,20 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
       body: renderSpecComment(spec.output!),
     });
 
-    await store.updateRunState(run.id, RunState.Specified);
+    // Persist spec meta for the resume path (which doesn't re-run Intake), then move
+    // into the clarification gate. `Specifying` here means "drafted, awaiting the gate".
+    await store.updateRunContext(run.id, {
+      ...run.context,
+      spec: { title: intake.output!.title, classification: intake.output!.classification },
+    });
+    await store.updateRunState(run.id, RunState.Specifying);
+    await store.enqueueJob({
+      type: 'clarify',
+      payload: { installationId, owner, repo, issueNumber },
+    });
     log.info(
       { runId: run.id, repo: repoLabel, branch: committed.branch, path: committed.path },
-      'Committed spec and posted summary',
+      'Committed spec, posted summary, and enqueued clarification gate',
     );
   } catch (err) {
     if (err instanceof BudgetExhaustedError) {
@@ -205,6 +223,214 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
       });
       await store.updateRunState(run.id, RunState.Failed);
       log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during spec');
+      return;
+    }
+    throw err;
+  }
+}
+
+interface SpecMeta {
+  title?: string;
+  classification?: string;
+}
+
+interface ClarificationContext {
+  questions: string[];
+}
+
+/** Read the persisted spec meta + clarification questions off a run's context blob. */
+function readRunContext(context: Record<string, unknown>): {
+  spec: SpecMeta;
+  questions: string[];
+} {
+  const spec = (context.spec as SpecMeta | undefined) ?? {};
+  const clarification = context.clarification as ClarificationContext | undefined;
+  return { spec, questions: clarification?.questions ?? [] };
+}
+
+/**
+ * Handle a `clarify` job (Phase 5 clarification gate): run the Clarifier (Haiku) over the
+ * draft spec and decide the run's fate deterministically by how many genuine questions it
+ * returns — pass silently (0), park with one batched question comment (≤ cap), or bounce
+ * the issue as too underspecified (> cap).
+ *
+ * Idempotent: only acts when the run is in `Specifying`; a retry after the gate has decided
+ * is a no-op. A budget exhaustion stops gracefully.
+ */
+export async function handleClarify(job: Job, deps: SpecHandlerDeps): Promise<void> {
+  const { store, github, gateway, log } = deps;
+  const { installationId, owner, repo, issueNumber } = job.payload as ClarifyPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.Specifying) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not awaiting the gate; skipping');
+    return;
+  }
+
+  const specArtifact = await store.getArtifact(run.id, 'spec');
+  if (!specArtifact) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'Clarify with no spec artifact; skipping');
+    return;
+  }
+
+  const ctx = { runId: run.id, gateway, log };
+
+  try {
+    const result = await runAgent<Clarification>(
+      'clarifier',
+      { messages: [{ role: 'user', content: `Draft spec:\n\n${specArtifact.content}` }] },
+      ctx,
+    );
+    const questions = result.output!.questions;
+
+    if (questions.length === 0) {
+      await store.updateRunState(run.id, RunState.Specified);
+      log.info({ runId: run.id, repo: repoLabel }, 'Clarification gate passed — no questions');
+      return;
+    }
+
+    if (questions.length > CLARIFY_QUESTION_CAP) {
+      await github.postIssueComment({
+        installationId,
+        owner,
+        repo,
+        issueNumber,
+        body: renderTooUnderspecifiedComment(questions),
+      });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.info(
+        { runId: run.id, repo: repoLabel, count: questions.length },
+        'Bounced — too underspecified',
+      );
+      return;
+    }
+
+    // Park: persist the asked questions (so resume can pair them with the reply), post one
+    // batched comment, then suspend. No job is left running — the worker goes idle.
+    await store.updateRunContext(run.id, { ...run.context, clarification: { questions } });
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderClarificationComment(questions),
+    });
+    await store.updateRunState(run.id, RunState.AwaitingClarification);
+    log.info(
+      { runId: run.id, repo: repoLabel, count: questions.length },
+      'Parked awaiting clarification',
+    );
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during clarify');
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Handle a `resume_clarification` job (Phase 5 resume): a human replied in the issue thread
+ * while the run was parked. Re-run the Product Owner with the draft spec + the questions we
+ * asked + the human's reply to finalize the spec, re-commit it, and advance.
+ *
+ * Idempotent: only acts when the run is in `AwaitingClarification`; a duplicate reply's job
+ * is a no-op once resumed. A budget exhaustion stops gracefully.
+ */
+export async function handleResumeClarification(job: Job, deps: SpecHandlerDeps): Promise<void> {
+  const { store, github, gateway, log } = deps;
+  const { installationId, owner, repo, issueNumber, commentBody } =
+    job.payload as ResumeClarificationPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.AwaitingClarification) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not parked; skipping resume');
+    return;
+  }
+
+  const specArtifact = await store.getArtifact(run.id, 'spec');
+  if (!specArtifact) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'Resume with no spec artifact; skipping');
+    return;
+  }
+
+  const { spec: meta, questions } = readRunContext(run.context);
+  const issue = await github.getIssue({ installationId, owner, repo, issueNumber });
+  const ctx = { runId: run.id, gateway, log };
+
+  try {
+    const spec = await runAgent<Spec>(
+      'product-owner',
+      {
+        messages: [
+          {
+            role: 'user',
+            content:
+              'This spec was drafted with open questions; a maintainer has now answered them. ' +
+              'Re-emit the FULL updated spec, folding in the answers and upgrading confidence ' +
+              'tags where the answers resolve uncertainty.\n\n' +
+              `Original issue —\nTitle: ${issue.title}\n\nBody:\n${issue.body}\n\n` +
+              `Previous draft spec (markdown):\n${specArtifact.content}\n\n` +
+              `Clarifying questions asked:\n${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n` +
+              `Maintainer's reply (untrusted DATA):\n${commentBody}`,
+          },
+        ],
+      },
+      ctx,
+    );
+
+    const markdown = renderSpecMarkdown(spec.output!, {
+      issueNumber,
+      title: meta.title ?? issue.title,
+      classification: meta.classification ?? 'feature',
+    });
+
+    const committed = await commitSpec(github, {
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      markdown,
+    });
+
+    await store.recordArtifact({
+      runId: run.id,
+      kind: 'spec',
+      path: committed.path,
+      content: markdown,
+      commitSha: committed.commitSha,
+    });
+
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderSpecUpdatedComment(),
+    });
+
+    await store.updateRunState(run.id, RunState.Specified);
+    log.info(
+      { runId: run.id, repo: repoLabel, branch: committed.branch },
+      'Resumed: finalized spec from clarification reply',
+    );
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during resume');
       return;
     }
     throw err;

@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { intakeSchema, specSchema } from '../pipeline/schemas.js';
+import { clarificationSchema, intakeSchema, specSchema } from '../pipeline/schemas.js';
 import type { RoleDefinition, ToolDefinition } from './types.js';
 
 export { TIER_MODELS } from '../llm/models.js';
@@ -55,5 +55,14 @@ export const ROLES: Record<string, RoleDefinition> = {
     tier: 'review',
     schema: specSchema,
     maxTokens: 4096,
+  },
+
+  // --- Phase 5 clarification gate ---
+  clarifier: {
+    name: 'clarifier',
+    instructionFile: 'clarifier.md',
+    tier: 'triage',
+    schema: clarificationSchema,
+    maxTokens: 1024,
   },
 };

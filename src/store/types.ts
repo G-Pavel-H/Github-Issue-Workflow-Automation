@@ -31,7 +31,12 @@ export type RunState = (typeof RunState)[keyof typeof RunState];
 export type JobStatus = 'queued' | 'in_progress' | 'done' | 'failed';
 
 /** Job types grow with the pipeline. */
-export type JobType = 'issue_opened' | 'run_tests' | 'produce_spec';
+export type JobType =
+  | 'issue_opened'
+  | 'run_tests'
+  | 'produce_spec'
+  | 'clarify'
+  | 'resume_clarification';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -59,7 +64,30 @@ export interface ProduceSpecPayload {
   issueNumber: number;
 }
 
-export type JobPayload = IssueOpenedPayload | RunTestsPayload | ProduceSpecPayload;
+/** Payload for a `clarify` job (Phase 5 clarification gate). Same shape as produce_spec. */
+export interface ClarifyPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}
+
+/** Payload for a `resume_clarification` job (Phase 5 resume on a human reply). */
+export interface ResumeClarificationPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  /** The human's reply comment body — untrusted DATA fed back to finalize the spec. */
+  commentBody: string;
+}
+
+export type JobPayload =
+  | IssueOpenedPayload
+  | RunTestsPayload
+  | ProduceSpecPayload
+  | ClarifyPayload
+  | ResumeClarificationPayload;
 
 export interface Job {
   id: number;
@@ -162,6 +190,8 @@ export interface Store {
   markJobFailed(jobId: number, error: string): Promise<void>;
   findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult>;
   updateRunState(runId: number, state: RunState): Promise<void>;
+  /** Persist the run's context blob (suspend/resume state). */
+  updateRunContext(runId: number, context: Record<string, unknown>): Promise<void>;
   getRun(key: RunKey): Promise<Run | null>;
   getRunById(runId: number): Promise<Run | null>;
   setRunBudget(runId: number, budgetNanoUsd: number): Promise<void>;

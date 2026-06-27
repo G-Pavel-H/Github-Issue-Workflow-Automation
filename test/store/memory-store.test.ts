@@ -80,6 +80,14 @@ describe('InMemoryStore — runs', () => {
     const fetched = await store.getRun(key);
     expect(fetched!.state).toBe(RunState.Acknowledged);
   });
+
+  it('persists and reads back the run context blob', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    expect(run.context).toEqual({});
+    await store.updateRunContext(run.id, { clarification: { questions: ['Q1', 'Q2'] } });
+    const fetched = await store.getRun(key);
+    expect(fetched!.context).toEqual({ clarification: { questions: ['Q1', 'Q2'] } });
+  });
 });
 
 describe('InMemoryStore — test runs', () => {

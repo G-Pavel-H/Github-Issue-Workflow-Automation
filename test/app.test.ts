@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Probot, ProbotOctokit } from 'probot';
 import { createApp } from '../src/app.js';
 import { InMemoryStore } from '../src/store/memory-store.js';
+import { RunState, type RunKey } from '../src/store/types.js';
 import { silentLog } from './helpers.js';
 
 const TEST_PRIVATE_KEY =
@@ -77,6 +78,107 @@ describe('createApp — issues.opened', () => {
   it('enqueues only once for a duplicate webhook delivery', async () => {
     await probot.receive({ id: 'dup', name: 'issues', payload: issuesOpenedPayload() as never });
     await probot.receive({ id: 'dup', name: 'issues', payload: issuesOpenedPayload() as never });
+
+    expect(await store.claimNextJob()).not.toBeNull();
+    expect(await store.claimNextJob()).toBeNull();
+  });
+});
+
+const PARKED_KEY: RunKey = {
+  installationId: 7,
+  owner: 'acme',
+  repo: 'widgets',
+  issueNumber: 42,
+};
+
+function issueCommentPayload(opts: { body?: string; userType?: 'User' | 'Bot' } = {}) {
+  return {
+    action: 'created',
+    comment: {
+      body: opts.body ?? 'Use JSON, and UTC timestamps.',
+      user: { login: 'maintainer', type: opts.userType ?? 'User' },
+    },
+    issue: { number: 42, title: 'Test issue', body: 'A body' },
+    repository: {
+      full_name: 'acme/widgets',
+      name: 'widgets',
+      owner: { login: 'acme' },
+    },
+    installation: { id: 7 },
+  } as const;
+}
+
+describe('createApp — issue_comment.created (clarification resume)', () => {
+  let store: InMemoryStore;
+  let probot: Probot;
+  beforeEach(async () => {
+    store = new InMemoryStore();
+    probot = buildProbot(store);
+  });
+
+  async function park(): Promise<void> {
+    const { run } = await store.findOrCreateRun(PARKED_KEY, RunState.Received);
+    await store.updateRunState(run.id, RunState.AwaitingClarification);
+  }
+
+  it('enqueues a resume_clarification job when a human replies on a parked run', async () => {
+    await park();
+    await probot.receive({
+      id: 'c-1',
+      name: 'issue_comment',
+      payload: issueCommentPayload() as never,
+    });
+
+    const job = await store.claimNextJob();
+    expect(job!.type).toBe('resume_clarification');
+    expect(job!.payload).toMatchObject({
+      installationId: 7,
+      owner: 'acme',
+      repo: 'widgets',
+      issueNumber: 42,
+      commentBody: 'Use JSON, and UTC timestamps.',
+    });
+  });
+
+  it('ignores bot comments (never resumes on its own question comment)', async () => {
+    await park();
+    await probot.receive({
+      id: 'c-bot',
+      name: 'issue_comment',
+      payload: issueCommentPayload({ userType: 'Bot' }) as never,
+    });
+
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('is a no-op when the run is not awaiting clarification', async () => {
+    // Run exists but in a different state.
+    const { run } = await store.findOrCreateRun(PARKED_KEY, RunState.Received);
+    await store.updateRunState(run.id, RunState.Specified);
+
+    await probot.receive({
+      id: 'c-2',
+      name: 'issue_comment',
+      payload: issueCommentPayload() as never,
+    });
+
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('is a no-op when no run exists for the issue', async () => {
+    await probot.receive({
+      id: 'c-3',
+      name: 'issue_comment',
+      payload: issueCommentPayload() as never,
+    });
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('enqueues only once for a duplicate comment delivery', async () => {
+    await park();
+    const payload = issueCommentPayload();
+    await probot.receive({ id: 'dup-c', name: 'issue_comment', payload: payload as never });
+    await probot.receive({ id: 'dup-c', name: 'issue_comment', payload: payload as never });
 
     expect(await store.claimNextJob()).not.toBeNull();
     expect(await store.claimNextJob()).toBeNull();

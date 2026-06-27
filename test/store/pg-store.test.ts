@@ -76,6 +76,14 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
     expect((await store.getRun(key))!.state).toBe(RunState.Acknowledged);
   });
 
+  it('persists and reads back the run context blob', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.updateRunContext(run.id, { clarification: { questions: ['Q1', 'Q2'] } });
+    expect((await store.getRun(key))!.context).toEqual({
+      clarification: { questions: ['Q1', 'Q2'] },
+    });
+  });
+
   it('dedupes processed events by delivery id', async () => {
     expect(await store.tryMarkEventProcessed('x-1')).toBe(true);
     expect(await store.tryMarkEventProcessed('x-1')).toBe(false);

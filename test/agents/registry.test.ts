@@ -38,4 +38,10 @@ describe('role registry', () => {
     expect(ROLES['product-owner']!.tier).toBe('review');
     expect(ROLES['product-owner']!.schema).toBeDefined();
   });
+
+  it('defines the Phase 5 clarifier role on the triage tier', () => {
+    expect(ROLES['clarifier']).toBeDefined();
+    expect(ROLES['clarifier']!.tier).toBe('triage');
+    expect(ROLES['clarifier']!.schema).toBeDefined();
+  });
 });

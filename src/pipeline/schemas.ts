@@ -35,3 +35,14 @@ export const specSchema = z.object({
   openQuestions: z.array(z.string()),
 });
 export type Spec = z.infer<typeof specSchema>;
+
+/**
+ * Clarifier output (Phase 5): the genuine clarifying questions to put to the human,
+ * derived from the spec's `unknown` and risky `assumption` items. The cap is enforced
+ * in code (the orchestrator decides whether to ask, batch, or bounce) — the agent
+ * returns every question it would genuinely ask.
+ */
+export const clarificationSchema = z.object({
+  questions: z.array(z.string()),
+});
+export type Clarification = z.infer<typeof clarificationSchema>;

@@ -145,6 +145,13 @@ export class PgStore implements Store {
     ]);
   }
 
+  async updateRunContext(runId: number, context: Record<string, unknown>): Promise<void> {
+    await this.pool.query(`UPDATE runs SET context = $2, updated_at = now() WHERE id = $1`, [
+      runId,
+      JSON.stringify(context),
+    ]);
+  }
+
   async getRun(key: RunKey): Promise<Run | null> {
     const { rows } = await this.pool.query(
       `SELECT id, installation_id, owner, repo, issue_number, state, context,
