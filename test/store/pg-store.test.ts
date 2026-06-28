@@ -164,6 +164,62 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
     });
   });
 
+  it('re-queues a failed job with a future backoff, then dead-letters at the cap', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob(); // attempts -> 1
+
+    const retry = await store.failOrRetryJob(job.id, 'boom', { maxAttempts: 2, backoffMs: 60_000 });
+    expect(retry).toEqual({ status: 'queued', attempts: 1 });
+    // Backed off into the future — not claimable right now.
+    expect(await store.claimNextJob()).toBeNull();
+
+    // Force it due, claim again (attempts -> 2), then exceed the cap.
+    await pool.query(`UPDATE jobs SET available_at = now() - interval '1 second' WHERE id = $1`, [job.id]);
+    await store.claimNextJob();
+    const dead = await store.failOrRetryJob(job.id, 'boom again', { maxAttempts: 2, backoffMs: 60_000 });
+    expect(dead.status).toBe('failed');
+  });
+
+  it('reclaims an in_progress job whose lease has expired', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob(); // now in_progress, locked_at = now()
+
+    // A live worker with a 0ms lease treats any locked job as abandoned.
+    const reclaimed = await store.claimNextJob(0);
+    expect(reclaimed!.id).toBe(job.id);
+    expect(reclaimed!.attempts).toBe(2);
+  });
+
+  it('lists stale parked runs and records pings without resetting the clock', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingPlanApproval);
+    const cutoff = Date.now() + 60_000; // everything created before now+1min
+
+    const stale = await store.getStaleRuns([RunState.AwaitingPlanApproval], cutoff);
+    expect(stale.map((r) => r.id)).toEqual([run.id]);
+    expect(stale[0]!.stalePingedAt).toBeNull();
+
+    const pingedAt = Date.now();
+    await store.markRunPinged(run.id, pingedAt);
+    const after = await store.getStaleRuns([RunState.AwaitingPlanApproval], cutoff);
+    expect(after[0]!.stalePingedAt).not.toBeNull();
+    // Different state is not returned.
+    expect(await store.getStaleRuns([RunState.AwaitingPrReview], cutoff)).toHaveLength(0);
+  });
+
+  it('aggregates measured cost across runs', async () => {
+    const a = await store.findOrCreateRun(key, RunState.Received);
+    const b = await store.findOrCreateRun({ ...key, issueNumber: 43 }, RunState.Received);
+    await store.recordLlmCall({
+      runId: a.run.id, role: 'triage', model: 'm',
+      inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, costNanoUsd: 300,
+    });
+    await store.recordLlmCall({
+      runId: b.run.id, role: 'triage', model: 'm',
+      inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, costNanoUsd: 100,
+    });
+    expect(await store.getCostMetrics()).toEqual({ runCount: 2, totalNanoUsd: 400, avgCostNanoUsd: 200 });
+  });
+
   it('records and lists test runs against a run', async () => {
     const { run } = await store.findOrCreateRun(key, RunState.Received);
     const recorded = await store.recordTestRun({

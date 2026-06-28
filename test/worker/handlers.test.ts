@@ -41,6 +41,22 @@ describe('handleIssueOpened', () => {
     expect(run!.state).toBe(RunState.Acknowledged);
   });
 
+  it('applies the configured per-run budget when the run is created', async () => {
+    const github = fakeGitHub();
+    await handleIssueOpened(job, { store, github, log: silentLog, runBudgetNanoUsd: 2_500_000_000 });
+
+    const run = await store.getRun(job.payload);
+    expect(run!.budgetNanoUsd).toBe(2_500_000_000);
+  });
+
+  it('leaves the default budget when no override is configured', async () => {
+    const github = fakeGitHub();
+    await handleIssueOpened(job, { store, github, log: silentLog });
+
+    const run = await store.getRun(job.payload);
+    expect(run!.budgetNanoUsd).toBe(1_000_000_000); // DEFAULT_RUN_BUDGET_NANO_USD
+  });
+
   it('enqueues a produce_spec job after acknowledging', async () => {
     const github = fakeGitHub();
     await handleIssueOpened(job, { store, github, log: silentLog });

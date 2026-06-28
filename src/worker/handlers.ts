@@ -22,6 +22,7 @@ import { runAgent } from '../agents/runner.js';
 import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
 import { renderEscalationComment, renderImplementationDoneComment } from '../pipeline/implement.js';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
+import { renderCostSummary } from '../pipeline/cost.js';
 import {
   FIX_ROUND_CAP,
   renderFixCapComment,
@@ -75,6 +76,8 @@ export interface HandlerDeps {
   store: Store;
   github: GitHubClient;
   log: Logger;
+  /** Optional per-run budget ceiling (nano-USD) applied when a run is first created. */
+  runBudgetNanoUsd?: number;
 }
 
 export interface RunTestsHandlerDeps extends HandlerDeps {
@@ -120,10 +123,15 @@ export async function handleIssueOpened(job: Job, deps: HandlerDeps): Promise<vo
   const { store, github, log } = deps;
   const { installationId, owner, repo, issueNumber } = job.payload;
 
-  const { run } = await store.findOrCreateRun(
+  const { run, created } = await store.findOrCreateRun(
     { installationId, owner, repo, issueNumber },
     RunState.Received,
   );
+
+  // Apply the configured per-run budget ceiling at the one place a run is born.
+  if (created && deps.runBudgetNanoUsd !== undefined) {
+    await store.setRunBudget(run.id, deps.runBudgetNanoUsd);
+  }
 
   if (run.state !== RunState.Received) {
     log.info(
@@ -984,13 +992,16 @@ export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<voi
       ctx,
     );
 
+    // The review is the run's last model call, so the cost summary is now complete.
+    const costSummary = renderCostSummary(await store.getLlmCalls(run.id));
+
     const pr = await openPullRequestForIssue(github, {
       installationId,
       owner,
       repo,
       issueNumber,
       title: renderPrTitle({ title: meta.title ?? `Issue #${issueNumber}` }, issueNumber),
-      body: renderPrBody({ spec: specData, plan: planData, review: review.output!, issueNumber }),
+      body: renderPrBody({ spec: specData, plan: planData, review: review.output!, issueNumber, costSummary }),
     });
 
     await github.postIssueComment({
@@ -998,11 +1009,15 @@ export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<voi
       owner,
       repo,
       issueNumber,
-      body: renderReviewedComment(pr.url, review.output!),
+      body: renderReviewedComment(pr.url, review.output!, costSummary),
     });
 
     await store.updateRunState(run.id, RunState.AwaitingPrReview);
-    log.info({ runId: run.id, repo: repoLabel, pr: pr.number }, 'Opened PR; awaiting human review');
+    const spent = (await store.getRunById(run.id))?.spentNanoUsd ?? 0;
+    log.info(
+      { runId: run.id, repo: repoLabel, pr: pr.number, spentNanoUsd: spent },
+      'Opened PR; awaiting human review',
+    );
   } catch (err) {
     if (err instanceof BudgetExhaustedError) {
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });

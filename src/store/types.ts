@@ -169,10 +169,27 @@ export interface Run {
   budgetNanoUsd: number;
   /** Cumulative model spend in nano-USD. */
   spentNanoUsd: number;
+  /** Last state/context change (epoch ms). Drives stale-run detection. */
+  updatedAt: number;
+  /** When the run was last pinged about inactivity (epoch ms), or null. */
+  stalePingedAt: number | null;
 }
 
 /** Default per-run budget: $1.00. Overridable via config / setRunBudget. */
 export const DEFAULT_RUN_BUDGET_NANO_USD = 1_000_000_000;
+
+/** Outcome of failing a job: either re-queued for a backoff retry, or dead-lettered. */
+export interface FailOrRetryResult {
+  status: 'queued' | 'failed';
+  attempts: number;
+}
+
+/** Aggregate model spend across runs — the measured average cost/issue. */
+export interface CostMetrics {
+  runCount: number;
+  totalNanoUsd: number;
+  avgCostNanoUsd: number;
+}
 
 /** Identifies the one run that belongs to a given issue. */
 export interface RunKey {
@@ -271,10 +288,20 @@ export interface Artifact extends RecordArtifactInput {
  */
 export interface Store {
   enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job>;
-  /** Atomically claim the next queued job, marking it in_progress. */
-  claimNextJob(): Promise<Job | null>;
+  /**
+   * Atomically claim the next runnable job: a queued job whose `available_at` is due, or an
+   * `in_progress` job whose worker died (its lease `locked_at` is older than `leaseMs`). Marks
+   * it in_progress and bumps `attempts`.
+   */
+  claimNextJob(leaseMs?: number): Promise<Job | null>;
   markJobDone(jobId: number): Promise<void>;
   markJobFailed(jobId: number, error: string): Promise<void>;
+  /** Re-queue the job with a backoff delay if under the attempt cap, else dead-letter it. */
+  failOrRetryJob(
+    jobId: number,
+    error: string,
+    opts: { maxAttempts: number; backoffMs: number },
+  ): Promise<FailOrRetryResult>;
   findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult>;
   updateRunState(runId: number, state: RunState): Promise<void>;
   /** Persist the run's context blob (suspend/resume state). */
@@ -282,6 +309,10 @@ export interface Store {
   getRun(key: RunKey): Promise<Run | null>;
   getRunById(runId: number): Promise<Run | null>;
   setRunBudget(runId: number, budgetNanoUsd: number): Promise<void>;
+  /** Parked runs in `states` not touched since `updatedBefore` (epoch ms) — stale candidates. */
+  getStaleRuns(states: RunState[], updatedBefore: number): Promise<Run[]>;
+  /** Record an inactivity ping without bumping `updatedAt` (keeps the staleness clock running). */
+  markRunPinged(runId: number, pingedAt: number): Promise<void>;
   /** Returns true if the delivery id was newly recorded, false if already seen. */
   tryMarkEventProcessed(deliveryId: string): Promise<boolean>;
   recordTestRun(input: RecordTestRunInput): Promise<TestRun>;
@@ -289,6 +320,8 @@ export interface Store {
   /** Insert an llm_calls row and atomically add its cost to the run's spend. */
   recordLlmCall(input: RecordLlmCallInput): Promise<RecordLlmCallResult>;
   getLlmCalls(runId: number): Promise<LlmCall[]>;
+  /** Aggregate spend across all runs (measured average cost/issue). */
+  getCostMetrics(): Promise<CostMetrics>;
   /** Upsert an artifact keyed by (runId, kind). */
   recordArtifact(input: RecordArtifactInput): Promise<Artifact>;
   getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null>;

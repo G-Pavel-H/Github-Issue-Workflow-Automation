@@ -2,6 +2,8 @@ import type { Pool, QueryResultRow } from 'pg';
 import type {
   Artifact,
   ArtifactKind,
+  CostMetrics,
+  FailOrRetryResult,
   FindOrCreateRunResult,
   Job,
   JobPayload,
@@ -20,6 +22,7 @@ import type {
   TestRun,
   UpdateTaskInput,
 } from './types.js';
+import { DEFAULT_JOB_LEASE_MS, computeBackoffMs } from '../worker/retry.js';
 import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
 
 function mapJob(row: QueryResultRow): Job {
@@ -82,8 +85,14 @@ function mapRun(row: QueryResultRow): Run {
     context: (row.context as Record<string, unknown>) ?? {},
     budgetNanoUsd: Number(row.budget_nano_usd),
     spentNanoUsd: Number(row.spent_nano_usd),
+    updatedAt: new Date(row.updated_at as string).getTime(),
+    stalePingedAt: row.stale_pinged_at === null ? null : new Date(row.stale_pinged_at as string).getTime(),
   };
 }
+
+/** Columns selected for every Run read — keep in sync with mapRun. */
+const RUN_COLUMNS = `id, installation_id, owner, repo, issue_number, state, context,
+              budget_nano_usd, spent_nano_usd, updated_at, stale_pinged_at`;
 
 function mapLlmCall(row: QueryResultRow): LlmCall {
   return {
@@ -112,18 +121,22 @@ export class PgStore implements Store {
     return mapJob(rows[0]!);
   }
 
-  async claimNextJob(): Promise<Job | null> {
+  async claimNextJob(leaseMs: number = DEFAULT_JOB_LEASE_MS): Promise<Job | null> {
+    // Claim a due `queued` job, OR reclaim an `in_progress` job whose worker died
+    // (its lease — `locked_at` — is older than leaseMs). One round trip, race-safe.
     const { rows } = await this.pool.query(
       `UPDATE jobs
          SET status = 'in_progress', locked_at = now(), attempts = attempts + 1, updated_at = now()
        WHERE id = (
          SELECT id FROM jobs
-          WHERE status = 'queued'
-          ORDER BY id
+          WHERE (status = 'queued' AND available_at <= now())
+             OR (status = 'in_progress' AND locked_at < now() - make_interval(secs => $1::double precision / 1000))
+          ORDER BY available_at, id
           FOR UPDATE SKIP LOCKED
           LIMIT 1
        )
        RETURNING id, type, payload, status, attempts`,
+      [leaseMs],
     );
     return rows[0] ? mapJob(rows[0]) : null;
   }
@@ -142,14 +155,55 @@ export class PgStore implements Store {
     );
   }
 
+  async failOrRetryJob(
+    jobId: number,
+    error: string,
+    opts: { maxAttempts: number; backoffMs: number },
+  ): Promise<FailOrRetryResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(`SELECT attempts FROM jobs WHERE id = $1 FOR UPDATE`, [
+        jobId,
+      ]);
+      if (!rows[0]) {
+        await client.query('ROLLBACK');
+        return { status: 'failed', attempts: 0 };
+      }
+      const attempts = Number(rows[0].attempts);
+      if (attempts >= opts.maxAttempts) {
+        await client.query(
+          `UPDATE jobs SET status = 'failed', last_error = $2, updated_at = now() WHERE id = $1`,
+          [jobId, error],
+        );
+        await client.query('COMMIT');
+        return { status: 'failed', attempts };
+      }
+      const backoffMs = computeBackoffMs(attempts, opts.backoffMs);
+      await client.query(
+        `UPDATE jobs
+            SET status = 'queued', locked_at = NULL, last_error = $2, updated_at = now(),
+                available_at = now() + make_interval(secs => $3::double precision / 1000)
+          WHERE id = $1`,
+        [jobId, error, backoffMs],
+      );
+      await client.query('COMMIT');
+      return { status: 'queued', attempts };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult> {
     const { rows } = await this.pool.query(
       `INSERT INTO runs (installation_id, owner, repo, issue_number, state)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (installation_id, owner, repo, issue_number)
        DO UPDATE SET updated_at = now()
-       RETURNING id, installation_id, owner, repo, issue_number, state, context,
-                 budget_nano_usd, spent_nano_usd, (xmax = 0) AS created`,
+       RETURNING ${RUN_COLUMNS}, (xmax = 0) AS created`,
       [key.installationId, key.owner, key.repo, key.issueNumber, initialState],
     );
     const row = rows[0]!;
@@ -172,8 +226,7 @@ export class PgStore implements Store {
 
   async getRun(key: RunKey): Promise<Run | null> {
     const { rows } = await this.pool.query(
-      `SELECT id, installation_id, owner, repo, issue_number, state, context,
-              budget_nano_usd, spent_nano_usd
+      `SELECT ${RUN_COLUMNS}
          FROM runs
         WHERE installation_id = $1 AND owner = $2 AND repo = $3 AND issue_number = $4`,
       [key.installationId, key.owner, key.repo, key.issueNumber],
@@ -183,9 +236,7 @@ export class PgStore implements Store {
 
   async getRunById(runId: number): Promise<Run | null> {
     const { rows } = await this.pool.query(
-      `SELECT id, installation_id, owner, repo, issue_number, state, context,
-              budget_nano_usd, spent_nano_usd
-         FROM runs WHERE id = $1`,
+      `SELECT ${RUN_COLUMNS} FROM runs WHERE id = $1`,
       [runId],
     );
     return rows[0] ? mapRun(rows[0]) : null;
@@ -195,6 +246,25 @@ export class PgStore implements Store {
     await this.pool.query(`UPDATE runs SET budget_nano_usd = $2, updated_at = now() WHERE id = $1`, [
       runId,
       budgetNanoUsd,
+    ]);
+  }
+
+  async getStaleRuns(states: RunState[], updatedBefore: number): Promise<Run[]> {
+    const { rows } = await this.pool.query(
+      `SELECT ${RUN_COLUMNS}
+         FROM runs
+        WHERE state = ANY($1) AND updated_at < $2
+        ORDER BY id`,
+      [states, new Date(updatedBefore)],
+    );
+    return rows.map(mapRun);
+  }
+
+  async markRunPinged(runId: number, pingedAt: number): Promise<void> {
+    // Deliberately does NOT touch updated_at — the staleness clock keeps running.
+    await this.pool.query(`UPDATE runs SET stale_pinged_at = $2 WHERE id = $1`, [
+      runId,
+      new Date(pingedAt),
     ]);
   }
 
@@ -283,6 +353,20 @@ export class PgStore implements Store {
       [runId],
     );
     return rows.map(mapLlmCall);
+  }
+
+  async getCostMetrics(): Promise<CostMetrics> {
+    const { rows } = await this.pool.query(
+      `SELECT COUNT(*)::bigint AS run_count, COALESCE(SUM(spent_nano_usd), 0)::bigint AS total
+         FROM runs`,
+    );
+    const runCount = Number(rows[0]!.run_count);
+    const totalNanoUsd = Number(rows[0]!.total);
+    return {
+      runCount,
+      totalNanoUsd,
+      avgCostNanoUsd: runCount === 0 ? 0 : Math.round(totalNanoUsd / runCount),
+    };
   }
 
   async recordArtifact(input: RecordArtifactInput): Promise<Artifact> {

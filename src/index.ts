@@ -62,6 +62,7 @@ async function main() {
     cloneRepo: cloneToTempDir,
     openSandbox: openCodeSandbox,
     log: probot.log,
+    runBudgetNanoUsd: config.runBudgetNanoUsd,
   });
 
   const shutdown = (signal: string) => {

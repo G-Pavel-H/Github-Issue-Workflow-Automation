@@ -6,6 +6,21 @@ export interface Config {
   databaseUrl: string;
   e2bApiKey: string;
   port: number;
+  /** Per-run budget ceiling in nano-USD. Default $1.00. Override via RUN_BUDGET_USD. */
+  runBudgetNanoUsd: number;
+}
+
+const NANO_PER_USD = 1_000_000_000;
+const DEFAULT_RUN_BUDGET_USD = 1.0;
+
+/** Parse RUN_BUDGET_USD (a dollar amount) into integer nano-USD, falling back to the default. */
+function parseRunBudgetNanoUsd(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_RUN_BUDGET_USD * NANO_PER_USD;
+  const usd = Number(raw);
+  if (!Number.isFinite(usd) || usd <= 0) {
+    throw new Error(`RUN_BUDGET_USD must be a positive number, got "${raw}"`);
+  }
+  return Math.round(usd * NANO_PER_USD);
 }
 
 const REQUIRED_VARS = [
@@ -31,5 +46,6 @@ export function loadConfig(): Config {
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
     port: parseInt(process.env.PORT ?? '3000', 10),
+    runBudgetNanoUsd: parseRunBudgetNanoUsd(process.env.RUN_BUDGET_USD),
   };
 }

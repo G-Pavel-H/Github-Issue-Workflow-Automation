@@ -36,7 +36,7 @@ describe('renderPrTitle', () => {
 });
 
 describe('renderPrBody', () => {
-  const body = renderPrBody({ spec, plan, review, issueNumber: 42 });
+  const body = renderPrBody({ spec, plan, review, issueNumber: 42, costSummary: '**💰 Run cost:** $0.001000 across 3 model calls.' });
 
   it('summarizes spec, plan, and assumptions', () => {
     expect(body).toContain('Add a JSON export');
@@ -48,12 +48,22 @@ describe('renderPrBody', () => {
     expect(body.toLowerCase()).toContain('approve');
     expect(body).toContain('Resolves #42');
   });
+
+  it('includes the run cost summary', () => {
+    expect(body).toContain('## Cost');
+    expect(body).toContain('Run cost');
+  });
 });
 
 describe('renderReviewedComment', () => {
-  it('links the PR and surfaces the verdict', () => {
-    const comment = renderReviewedComment('https://github.com/acme/widgets/pull/7', review);
+  it('links the PR, surfaces the verdict, and includes the cost', () => {
+    const comment = renderReviewedComment(
+      'https://github.com/acme/widgets/pull/7',
+      review,
+      '**💰 Run cost:** $0.001000 across 3 model calls.',
+    );
     expect(comment).toContain('https://github.com/acme/widgets/pull/7');
     expect(comment.toLowerCase()).toContain('approve');
+    expect(comment).toContain('Run cost');
   });
 });

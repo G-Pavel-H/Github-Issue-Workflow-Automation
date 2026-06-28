@@ -58,6 +58,134 @@ describe('InMemoryStore — job queue', () => {
   });
 });
 
+describe('InMemoryStore — job retries & lease recovery', () => {
+  let clock: number;
+  let store: InMemoryStore;
+  beforeEach(() => {
+    clock = 1_000_000;
+    store = new InMemoryStore({ now: () => clock });
+  });
+
+  it('re-queues a failed job with a backoff delay; not claimable until due', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob(); // attempts -> 1
+    const res = await store.failOrRetryJob(job.id, 'boom', { maxAttempts: 3, backoffMs: 1000 });
+    expect(res).toEqual({ status: 'queued', attempts: 1 });
+
+    // Still backing off — nothing due yet.
+    expect(await store.claimNextJob()).toBeNull();
+
+    // After the backoff elapses it becomes claimable again.
+    clock += 1000;
+    const reclaimed = await store.claimNextJob();
+    expect(reclaimed!.id).toBe(job.id);
+    expect(reclaimed!.attempts).toBe(2);
+  });
+
+  it('dead-letters once the attempt cap is reached', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob(); // attempts -> 1
+    await store.failOrRetryJob(job.id, 'boom', { maxAttempts: 1, backoffMs: 1000 });
+    expect(store.getJob(job.id)!.status).toBe('failed');
+    clock += 10_000;
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('reclaims an in_progress job whose worker died (lease expired)', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    const first = await store.claimNextJob(60_000);
+    expect(first!.id).toBe(job.id);
+
+    // Worker never finished; before the lease lapses it stays locked.
+    clock += 30_000;
+    expect(await store.claimNextJob(60_000)).toBeNull();
+
+    // After the lease lapses, a live worker reclaims it (attempts bumped again).
+    clock += 31_000;
+    const reclaimed = await store.claimNextJob(60_000);
+    expect(reclaimed!.id).toBe(job.id);
+    expect(reclaimed!.attempts).toBe(2);
+  });
+});
+
+describe('InMemoryStore — stale runs', () => {
+  let clock: number;
+  let store: InMemoryStore;
+  beforeEach(() => {
+    clock = 1_000_000;
+    store = new InMemoryStore({ now: () => clock });
+  });
+
+  it('lists parked runs untouched since the cutoff and tracks pings without resetting the clock', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingPlanApproval);
+    const createdAt = clock;
+
+    // Not stale yet.
+    expect(await store.getStaleRuns([RunState.AwaitingPlanApproval], createdAt)).toHaveLength(0);
+
+    clock += 5000;
+    const stale = await store.getStaleRuns([RunState.AwaitingPlanApproval], clock);
+    expect(stale.map((r) => r.id)).toEqual([run.id]);
+    expect(stale[0]!.stalePingedAt).toBeNull();
+
+    // A ping is recorded but does NOT reset updatedAt — the run is still stale.
+    await store.markRunPinged(run.id, clock);
+    const after = await store.getStaleRuns([RunState.AwaitingPlanApproval], clock + 1);
+    expect(after.map((r) => r.id)).toEqual([run.id]);
+    expect(after[0]!.stalePingedAt).toBe(clock);
+  });
+
+  it('filters by state', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingPlanApproval);
+    clock += 5000;
+    expect(await store.getStaleRuns([RunState.AwaitingPrReview], clock)).toHaveLength(0);
+    await store.updateRunState(run.id, RunState.AwaitingPrReview);
+    expect(await store.getStaleRuns([RunState.AwaitingPrReview], clock)).toHaveLength(0); // updatedAt just bumped
+    clock += 5000;
+    expect(await store.getStaleRuns([RunState.AwaitingPrReview], clock).then((r) => r.length)).toBe(1);
+  });
+});
+
+describe('InMemoryStore — cost metrics', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('reports zeros with no runs', async () => {
+    expect(await store.getCostMetrics()).toEqual({ runCount: 0, totalNanoUsd: 0, avgCostNanoUsd: 0 });
+  });
+
+  it('aggregates measured spend across runs', async () => {
+    const a = await store.findOrCreateRun(key, RunState.Received);
+    const b = await store.findOrCreateRun(
+      { ...key, issueNumber: 43 },
+      RunState.Received,
+    );
+    await store.recordLlmCall({
+      runId: a.run.id,
+      role: 'triage',
+      model: 'm',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costNanoUsd: 300,
+    });
+    await store.recordLlmCall({
+      runId: b.run.id,
+      role: 'triage',
+      model: 'm',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costNanoUsd: 100,
+    });
+    expect(await store.getCostMetrics()).toEqual({ runCount: 2, totalNanoUsd: 400, avgCostNanoUsd: 200 });
+  });
+});
+
 describe('InMemoryStore — runs', () => {
   let store: InMemoryStore;
   beforeEach(() => {

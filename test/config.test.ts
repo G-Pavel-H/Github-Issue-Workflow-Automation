@@ -20,10 +20,27 @@ describe('loadConfig', () => {
       delete process.env[key];
     }
     delete process.env.PORT;
+    delete process.env.RUN_BUDGET_USD;
   });
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('defaults the per-run budget to $1.00 (1e9 nano-USD) when RUN_BUDGET_USD is unset', () => {
+    Object.assign(process.env, validEnv);
+    delete process.env.RUN_BUDGET_USD;
+    expect(loadConfig().runBudgetNanoUsd).toBe(1_000_000_000);
+  });
+
+  it('parses RUN_BUDGET_USD (dollars) into integer nano-USD', () => {
+    Object.assign(process.env, validEnv, { RUN_BUDGET_USD: '2.5' });
+    expect(loadConfig().runBudgetNanoUsd).toBe(2_500_000_000);
+  });
+
+  it('rejects a non-positive RUN_BUDGET_USD', () => {
+    Object.assign(process.env, validEnv, { RUN_BUDGET_USD: '0' });
+    expect(() => loadConfig()).toThrow('RUN_BUDGET_USD');
   });
 
   it('parses all required env vars into a typed config', () => {

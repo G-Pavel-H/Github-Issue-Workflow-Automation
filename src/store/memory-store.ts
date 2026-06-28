@@ -1,7 +1,10 @@
+import { DEFAULT_JOB_LEASE_MS, computeBackoffMs } from '../worker/retry.js';
 import {
   DEFAULT_RUN_BUDGET_NANO_USD,
   type Artifact,
   type ArtifactKind,
+  type CostMetrics,
+  type FailOrRetryResult,
   type FindOrCreateRunResult,
   type Job,
   type JobPayload,
@@ -25,13 +28,29 @@ function runKeyOf(key: RunKey): string {
   return `${key.installationId}/${key.owner}/${key.repo}/${key.issueNumber}`;
 }
 
+/** Internal job record — carries the scheduling metadata not exposed on the public `Job`. */
+interface StoredJob extends Job {
+  availableAt: number;
+  lockedAt: number | null;
+}
+
+function publicJob(job: StoredJob): Job {
+  return { id: job.id, type: job.type, payload: job.payload, status: job.status, attempts: job.attempts };
+}
+
 /**
  * In-memory Store for unit tests and local dev without a database. Mirrors the
- * semantics of PgStore: FIFO claim, one run per issue, delivery-id dedupe.
+ * semantics of PgStore: due/lease-aware claim, one run per issue, delivery-id dedupe.
+ * `now` is injectable so retry/backoff and stale-run timing are deterministic in tests.
  */
 export class InMemoryStore implements Store {
-  private jobs = new Map<number, Job>();
+  private jobs = new Map<number, StoredJob>();
   private runs = new Map<string, Run>();
+  private readonly now: () => number;
+
+  constructor(opts: { now?: () => number } = {}) {
+    this.now = opts.now ?? Date.now;
+  }
   private processedEvents = new Set<string>();
   private testRuns: TestRun[] = [];
   private llmCalls: LlmCall[] = [];
@@ -45,25 +64,33 @@ export class InMemoryStore implements Store {
   private nextTaskId = 1;
 
   async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
-    const job: Job = {
+    const job: StoredJob = {
       id: this.nextJobId++,
       type: input.type,
       payload: input.payload,
       status: 'queued',
       attempts: 0,
+      availableAt: this.now(),
+      lockedAt: null,
     };
     this.jobs.set(job.id, job);
-    return job;
+    return publicJob(job);
   }
 
-  async claimNextJob(): Promise<Job | null> {
+  async claimNextJob(leaseMs: number = DEFAULT_JOB_LEASE_MS): Promise<Job | null> {
+    const now = this.now();
     const next = [...this.jobs.values()]
-      .filter((j) => j.status === 'queued')
+      .filter(
+        (j) =>
+          (j.status === 'queued' && j.availableAt <= now) ||
+          (j.status === 'in_progress' && j.lockedAt !== null && j.lockedAt < now - leaseMs),
+      )
       .sort((a, b) => a.id - b.id)[0];
     if (!next) return null;
     next.status = 'in_progress';
     next.attempts += 1;
-    return { ...next };
+    next.lockedAt = now;
+    return publicJob(next);
   }
 
   async markJobDone(jobId: number): Promise<void> {
@@ -74,6 +101,23 @@ export class InMemoryStore implements Store {
   async markJobFailed(jobId: number, _error: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (job) job.status = 'failed';
+  }
+
+  async failOrRetryJob(
+    jobId: number,
+    _error: string,
+    opts: { maxAttempts: number; backoffMs: number },
+  ): Promise<FailOrRetryResult> {
+    const job = this.jobs.get(jobId);
+    if (!job) return { status: 'failed', attempts: 0 };
+    if (job.attempts >= opts.maxAttempts) {
+      job.status = 'failed';
+      return { status: 'failed', attempts: job.attempts };
+    }
+    job.status = 'queued';
+    job.lockedAt = null;
+    job.availableAt = this.now() + computeBackoffMs(job.attempts, opts.backoffMs);
+    return { status: 'queued', attempts: job.attempts };
   }
 
   async findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult> {
@@ -91,23 +135,27 @@ export class InMemoryStore implements Store {
       context: {},
       budgetNanoUsd: DEFAULT_RUN_BUDGET_NANO_USD,
       spentNanoUsd: 0,
+      updatedAt: this.now(),
+      stalePingedAt: null,
     };
     this.runs.set(k, run);
     return { run: { ...run }, created: true };
   }
 
   async updateRunState(runId: number, state: RunState): Promise<void> {
-    for (const run of this.runs.values()) {
-      if (run.id === runId) {
-        run.state = state;
-        return;
-      }
+    const run = this.findRunById(runId);
+    if (run) {
+      run.state = state;
+      run.updatedAt = this.now();
     }
   }
 
   async updateRunContext(runId: number, context: Record<string, unknown>): Promise<void> {
     const run = this.findRunById(runId);
-    if (run) run.context = { ...context };
+    if (run) {
+      run.context = { ...context };
+      run.updatedAt = this.now();
+    }
   }
 
   async getRun(key: RunKey): Promise<Run | null> {
@@ -127,7 +175,23 @@ export class InMemoryStore implements Store {
 
   async setRunBudget(runId: number, budgetNanoUsd: number): Promise<void> {
     const run = this.findRunById(runId);
-    if (run) run.budgetNanoUsd = budgetNanoUsd;
+    if (run) {
+      run.budgetNanoUsd = budgetNanoUsd;
+      run.updatedAt = this.now();
+    }
+  }
+
+  async getStaleRuns(states: RunState[], updatedBefore: number): Promise<Run[]> {
+    return [...this.runs.values()]
+      .filter((r) => states.includes(r.state) && r.updatedAt < updatedBefore)
+      .sort((a, b) => a.id - b.id)
+      .map((r) => ({ ...r }));
+  }
+
+  async markRunPinged(runId: number, pingedAt: number): Promise<void> {
+    // Deliberately does NOT touch updatedAt — the staleness clock keeps running.
+    const run = this.findRunById(runId);
+    if (run) run.stalePingedAt = pingedAt;
   }
 
   async tryMarkEventProcessed(deliveryId: string): Promise<boolean> {
@@ -152,11 +216,23 @@ export class InMemoryStore implements Store {
     const run = this.findRunById(input.runId);
     if (!run) throw new Error(`Run ${input.runId} not found`);
     run.spentNanoUsd += input.costNanoUsd;
+    run.updatedAt = this.now();
     return { call: { ...call }, budgetRemainingNanoUsd: run.budgetNanoUsd - run.spentNanoUsd };
   }
 
   async getLlmCalls(runId: number): Promise<LlmCall[]> {
     return this.llmCalls.filter((c) => c.runId === runId).map((c) => ({ ...c }));
+  }
+
+  async getCostMetrics(): Promise<CostMetrics> {
+    const runs = [...this.runs.values()];
+    const runCount = runs.length;
+    const totalNanoUsd = runs.reduce((sum, r) => sum + r.spentNanoUsd, 0);
+    return {
+      runCount,
+      totalNanoUsd,
+      avgCostNanoUsd: runCount === 0 ? 0 : Math.round(totalNanoUsd / runCount),
+    };
   }
 
   async recordArtifact(input: RecordArtifactInput): Promise<Artifact> {
@@ -212,6 +288,6 @@ export class InMemoryStore implements Store {
   /** Test-only inspection helper (not part of the Store contract). */
   getJob(jobId: number): Job | undefined {
     const job = this.jobs.get(jobId);
-    return job ? { ...job } : undefined;
+    return job ? publicJob(job) : undefined;
   }
 }

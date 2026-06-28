@@ -25,14 +25,15 @@ function renderFindings(review: Review): string {
     .join('\n');
 }
 
-/** The PR body — the audit trail: spec, plan, assumptions, self-review, and the issue link. */
+/** The PR body — the audit trail: spec, plan, assumptions, self-review, cost, and the issue link. */
 export function renderPrBody(input: {
   spec: Spec;
   plan: Plan;
   review: Review;
   issueNumber: number;
+  costSummary: string;
 }): string {
-  const { spec, plan, review, issueNumber } = input;
+  const { spec, plan, review, issueNumber, costSummary } = input;
   const files = plan.affectedFiles.map((f) => `- \`${f.path}\` (${f.change})`).join('\n');
 
   return [
@@ -66,16 +67,21 @@ export function renderPrBody(input: {
     '',
     renderFindings(review),
     '',
+    '## Cost',
+    '',
+    costSummary,
+    '',
     '---',
     '',
     'The spec, plan, and a test-first commit per task are on this branch. Review and merge, or comment to request changes.',
   ].join('\n');
 }
 
-/** Posted on the issue once the PR is open — the human-facing pointer + verdict. */
-export function renderReviewedComment(prUrl: string, review: Review): string {
+/** Posted on the issue once the PR is open — the human-facing pointer + verdict + run cost. */
+export function renderReviewedComment(prUrl: string, review: Review, costSummary: string): string {
   return (
     `🔀 **Pull request opened:** ${prUrl}\n\n` +
-    `Self-review verdict: ${VERDICT_LABEL[review.verdict]}. ${review.summary}`
+    `Self-review verdict: ${VERDICT_LABEL[review.verdict]}. ${review.summary}\n\n` +
+    costSummary
   );
 }

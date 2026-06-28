@@ -17,7 +17,8 @@
     "migrate": "node-pg-migrate",
     "dev:smee": "smee --url $SMEE_URL --path /api/github/webhooks --port 3000",
     "debug:run-tests": "tsx scripts/debug-run-tests.ts",
-    "debug:index-repo": "tsx scripts/debug-index-repo.ts"
+    "debug:index-repo": "tsx scripts/debug-index-repo.ts",
+    "debug:cost-metrics": "tsx scripts/debug-cost-metrics.ts"
   },
   "license": "MIT",
   "dependencies": {
