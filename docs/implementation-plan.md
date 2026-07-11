@@ -313,3 +313,31 @@ These apply to **every** phase. They are not optional.
 ## 6. Definition of MVP done
 
 A person installs the GitHub App on a fresh repo, opens an issue, answers at most a few clarifying questions, approves the plan, and receives a PR implemented test-first — with the run's cost measured and within budget, and the whole thing reviewable in GitHub with no external dashboard. Everything beyond that is post-MVP.
+
+---
+
+## 7. Post-MVP backlog
+
+> Deferred beyond the MVP heartbeat. Not blocking the first live demo. To be revisited after a successful end-to-end run.
+
+### Phase 12 — Bring-your-own-key (per-installation credentials)
+
+**Goal:** Stop the platform operator from paying for every installation's model and sandbox usage. Each installation supplies its own `ANTHROPIC_API_KEY` (and optionally `E2B_API_KEY`), so inference cost accrues to the party that opened the issue, not to whoever hosts Tsukinome.
+
+**Why now (context):** As of the MVP, `loadConfig()` reads a single global `ANTHROPIC_API_KEY`/`E2B_API_KEY` from the process environment, and `src/index.ts` constructs one `AnthropicProvider` and one `E2BSandboxProvider` at startup, shared across all installations. That is single-tenant: the host pays for everything. This phase makes credentials per-installation. The existing cost instrumentation (Phase 3) and per-run budget cap are the groundwork — they start metering per installation rather than globally.
+
+**Build:**
+- **Secret storage:** a per-installation credentials table (reuse the existing Postgres), keyed by `installationId`, with the API keys encrypted at rest. Introduce a `MASTER_ENCRYPTION_KEY` env var for envelope encryption; never store plaintext keys or log them.
+- **Key intake:** a way for an installer to submit their key without it touching an agent or a commit. Decide between (a) a minimal settings page served by the existing server (post-install redirect → form → encrypted write), or (b) reading a designated repo/org secret. Option (a) is the recommended default; capture the decision here before building.
+- **Per-run credential resolution:** move `new AnthropicProvider(...)` / `new E2BSandboxProvider(...)` out of startup and into per-run construction, resolving the key from the run's `installationId` via the store. The provider interfaces do not change — only where/when they are instantiated and where the key comes from.
+- **Fallback / gating policy:** if an installation has no key on file, refuse gracefully with an issue comment explaining how to add one (mirrors the unsupported-language gate) — do **not** silently fall back to a platform key. Optionally support an operator-provided default key behind an explicit `ALLOW_PLATFORM_KEY_FALLBACK` flag for single-tenant/self-host use.
+- **Security:** treat stored keys under the same untrusted-input and least-privilege invariants; redact them from logs and error surfaces; rotate/revoke path (delete on uninstall via the `installation.deleted` webhook).
+- **Tests (dogfood TDD):** fake secret store with encrypt/decrypt round-trip; per-run resolution picks the right installation's key; missing-key path refuses without spending tokens; uninstall purges stored secrets.
+
+**Exit criteria:**
+- Two installations with different keys run concurrently, each billed to its own key; no cross-tenant leakage.
+- An installation with no key on file is refused gracefully with clear guidance, before any model call.
+- Keys are encrypted at rest, never logged, and purged on uninstall.
+- Single-tenant/self-host still works via the explicit platform-key fallback flag.
+
+**Open decisions (resolve before implementing):** key-intake mechanism (settings page vs repo secret); whether E2B is also BYO or stays platform-provided; whether to add usage metering/billing on top (separate phase).
