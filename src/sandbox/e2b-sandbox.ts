@@ -1,4 +1,5 @@
 import { Sandbox, CommandExitError } from 'e2b';
+import type { Logger } from '../log.js';
 import type {
   CommandResult,
   CreateSandboxOptions,
@@ -50,6 +51,7 @@ export class E2BSandboxProvider implements SandboxProvider {
   constructor(
     private readonly apiKey: string,
     private readonly template?: string,
+    private readonly log?: Logger,
   ) {}
 
   async create(opts?: CreateSandboxOptions): Promise<SandboxHandle> {
@@ -57,6 +59,11 @@ export class E2BSandboxProvider implements SandboxProvider {
     const sandbox = this.template
       ? await Sandbox.create(this.template, sandboxOpts)
       : await Sandbox.create(sandboxOpts);
+    // Surface which template booted — unset means E2B's base image (old Node), a common foot-gun.
+    this.log?.info(
+      { sandboxId: sandbox.sandboxId, template: this.template ?? 'base-image' },
+      'E2B sandbox created',
+    );
     return new E2BSandboxHandle(sandbox);
   }
 }
