@@ -17,6 +17,32 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 10 — PR comment → fix loop (bounded)
 - [x] Phase 11 — Reliability, security, easy install  ← MVP done ✅
 
+## Outstanding issues (revisit before calling go-live done)
+
+- **🔴 BLOCKER — TDD loop can't complete a cohesive single-function change.** The end-to-end
+  pipeline runs live through plan approval and task decomposition, but the implementation loop
+  cannot get past its **first task** on a change that is really one cohesive function
+  (`parsePlanDecision`, issue #4). Each decomposed slice's tests exercise the **public**
+  `parsePlanDecision(comment): PlanDecision` contract, but an early slice (e.g. CRLF/fenced-block
+  handling) only yields a *correct decision* once the later **matching** logic also exists — so the
+  early task's tests can't reach green until later tasks are done, yet the engine requires every
+  task to go green **independently**. Result: task #0 exhausts the implementer ladder
+  (Sonnet ×2 → Opus ×1) and escalates; the run stops (`Failed`).
+  - Tried during go-live: (v1) decomposition over-split into a test-only task #0 → un-greenable;
+    (v2) prompt fix → one 17-AC monolith, too big for the attempt budget; (v3) prompt fix → 5
+    well-sized incremental slices, but they're not independently observable through the public API,
+    so the first slice still can't green. See `agents/decomposer.md` history.
+  - This is a **design tension**, not a one-line bug. Options to weigh next:
+    (a) let the Decomposer emit a **single task** for a cohesive-function change and raise the
+    implementer attempt budget / start on Opus; (b) allow "scaffold now, satisfy later" tasks where
+    a slice may leave some ACs red until a dependent slice lands (relax the per-task green gate to a
+    per-*group* gate); (c) have the Test Author scope each slice's test to the **internal** helper
+    that slice introduces rather than the full public contract. Needs a decision before retrying.
+  - Also noted: a non-budget exception thrown *after* the `Planning`/`Implementing` transition can't
+    self-recover, because the retry is skipped by the `state !== <expected>` guard (the run strands
+    in the transient state). Worth hardening (reset-to-prior-state on retry, or transition only
+    after the risky step). Surfaced via the CocoIndex failure below.
+
 ## Locked decisions
 
 - Language: TypeScript throughout.
@@ -110,6 +136,65 @@ Keep this current. It's the source of truth for what's done and what's next.
 - 2026-06-28 (Phase 11): **Security pass is documented + regression-tested.** `docs/security.md` records the four pillars; `test/security/boundary.test.ts` pins the load-bearing ones — no agent role carries a write-capable tool (only the `ping` stub; all real roles are schema-only), the exported `CONSTITUTION` still declares external text untrusted DATA, and `redactToken` strips the clone token. The integrator wall, least-privilege `contents:read` clone token, and bot-comment handling were already in place from earlier phases.
 - 2026-06-28 (Phase 11): **Install UX needs no per-repo files.** README rewritten product-first (flow, gates, config table, observability) + `docs/setup.md` (GitHub App perms: contents/issues/PRs r-w + metadata r; events: issues, issue_comment, pull_request_review, pull_request_review_comment; env table; migrate/run/deploy). `.env.example` stays absent (blocked by this env's permission settings, as since Phase 2) — the env table is the source of truth.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
+
+## Go-live (2026-07-12)
+
+First bring-up against live services (Neon Postgres, Anthropic, E2B) with the GitHub App
+installed on this repo as the dogfood target. Local run via `npm run dev` + smee proxy.
+
+**What ran green.**
+
+- Build: typecheck + lint clean; `npm test` 189 pass / 23 skip.
+- Migrations: `npm run migrate up` applied all 8 migrations to Neon (incl. the `vector` extension
+  and the Phase-11 reliability columns). No pooler/DDL issue on the connection string in `.env`.
+- Gated integration tests (run with `.env` loaded) — **all pass in isolation**: Anthropic 4/4
+  (incl. prompt-cache `cache_read > 0` and a real intake+PO spec), PgStore 13/13, pgvector 4/4,
+  E2B 1/1. CocoIndex sidecar test stays skipped (needs `COCOINDEX_TEST=1` + a Python sidecar).
+  Running *all* gated suites at once against the single shared Neon DB shows two false failures
+  (`getCostMetrics`/`getLlmCalls` see rows from concurrent suites) — a shared-DB artifact, not a
+  code defect; CI isolates per run.
+
+**Live run (issue #4 — a bug report on Tsukinome's own `parsePlanDecision`).** Drove
+ack → draft spec → clarification (1 question, answered) → `plan.md` → `/approve` → decomposition →
+TDD loop. Everything worked **up to and including task decomposition**; the run then escalated on
+the first TDD task and stopped — see **Outstanding issues** (the cohesive-function decomposition
+blocker). No PR was produced yet.
+
+**Bugs found & fixed** (committed on branch `fix/go-live-runtime-fixes`, commit `703b129`; not yet
+merged to `main`). All were gaps the scripted unit-test fakes hid:
+
+1. **Null logger** — `probot.log` is `null` under our Probot version, so the gateway/worker/app
+   crashed on the first `log.info` (the gateway recorded the LLM cost, then threw). This is why the
+   first `produce_spec` charged tokens but kept failing/retrying. Fixed: added
+   `createConsoleLogger()` in `src/log.ts`, wired through `src/index.ts` instead of `probot.log`.
+2. **CocoIndex hard-dependency** — `produce_plan` called the Python sidecar unconditionally and
+   `ModuleNotFoundError: No module named 'cocoindex'` failed the job; the retry then stranded the
+   run in `planning` (state-guard skips it). Fixed: `runArchitectAndCommit` treats code retrieval
+   as best-effort and plans from the spec when the index is unavailable — matching
+   `docs/setup.md`'s "runs without CocoIndex" promise. (Installing the sidecar later restores
+   richer plan-time retrieval; optional.)
+3. **Decomposer prompt** — produced un-runnable task shapes (a test-only task, then a 17-AC
+   monolith). Fixed `agents/decomposer.md`: forbid test-only tasks (the harness writes the failing
+   test per task) + right-sizing guidance (3–6 tasks, ~1–3 ACs each). Improved the decomposition
+   but did **not** resolve the deeper blocker (see Outstanding issues).
+4. **E2B test drift** — `Sandbox.list()` now returns a paginator, not an array; fixed the
+   integration assertion in `test/sandbox/e2b.integration.test.ts`.
+
+**Cost (measured, not clean).** Issue #4 / run #2 spent **~$0.89** of budget before escalating —
+inflated by go-live debugging (failed logger retries, failed CocoIndex plan retries, and three
+decomposition attempts). Not a representative per-issue figure; get a clean number from a
+successful run once the blocker is resolved. Per-call audit remains in `llm_calls`.
+
+**Deviations / notes.**
+
+- Budget for run #2 was raised to $2.00 during debugging to give the retries headroom (default is
+  $1.00 via `RUN_BUDGET_USD`).
+- The gated integration tests wrote a few orphan rows to the **live Neon DB** (e.g. run #1 /
+  issue #42 from the Anthropic suite). Harmless (no jobs attached) but worth a cleanup pass.
+- Local run helper added: `scripts/start-tsukinome.sh` (starts server + smee, Ctrl+C stops both) —
+  currently untracked.
+- Per `CLAUDE.md`, `docs/implementation-plan.md` was **not** modified (Phase 12 / BYO-key stays
+  deferred). This was go-live, not a new build phase.
 
 ## Session log
 

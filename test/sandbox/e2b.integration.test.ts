@@ -23,9 +23,14 @@ describe.skipIf(!E2B_API_KEY)('E2BSandboxProvider (integration)', () => {
       await handle.kill();
     }
 
-    // No lingering sandbox with this id after teardown.
-    const running = await Sandbox.list();
-    const ids = running.map((s) => s.sandboxId);
+    // No lingering sandbox with this id after teardown. Sandbox.list() returns a
+    // paginator (SDK API changed from a bare array), so drain it into a flat id list.
+    const paginator = Sandbox.list();
+    const ids: string[] = [];
+    while (paginator.hasNext) {
+      const page = await paginator.nextItems();
+      ids.push(...page.map((s) => s.sandboxId));
+    }
     expect(ids).not.toContain(handle.id);
   }, 120_000);
 });

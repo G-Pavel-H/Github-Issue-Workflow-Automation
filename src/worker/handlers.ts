@@ -559,13 +559,32 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
   const namespace = namespaceFor({ owner, repo, runId });
 
   try {
-    await codeIndex.indexRepo({ namespace, dir: checkout.dir });
-    const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join('\n');
-    const chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
+    // Code retrieval is a best-effort enrichment: the CocoIndex sidecar is optional
+    // (see docs/setup.md), so if indexing/retrieval is unavailable we plan from the spec
+    // alone rather than failing the run.
+    let chunks: CodeChunk[] = [];
+    try {
+      await codeIndex.indexRepo({ namespace, dir: checkout.dir });
+      const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join(
+        '\n',
+      );
+      chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
+    } catch (err) {
+      log.warn(
+        {
+          runId,
+          repo: `${owner}/${repo}`,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Code index unavailable; planning from the spec without repo retrieval',
+      );
+    }
 
     const sections = [
       `Functional spec (markdown):\n${args.specMarkdown}`,
-      `Retrieved code context from the repo:\n${renderChunks(chunks)}`,
+      `Retrieved code context from the repo:\n${
+        chunks.length ? renderChunks(chunks) : '(code index unavailable — plan from the spec)'
+      }`,
     ];
     if (args.feedback) {
       sections.push(

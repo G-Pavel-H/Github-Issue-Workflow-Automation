@@ -14,9 +14,13 @@ import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoin
 import { cloneToTempDir } from './index/checkout.js';
 import { openCodeSandbox } from './sandbox/code-sandbox.js';
 import { startWorker } from './worker/worker.js';
+import { createConsoleLogger } from './log.js';
 
 async function main() {
   const config = loadConfig();
+  // Probot exposes `probot.log` as null under our version, so use our own logger for
+  // Tsukinome's modules (gateway/app/worker). Probot still logs internally on its own.
+  const log = createConsoleLogger();
 
   const pool = createPool(config.databaseUrl);
   const store = new PgStore(pool);
@@ -32,13 +36,13 @@ async function main() {
 
   const github = createProbotGitHubClient(probot);
   const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey);
-  const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, probot.log);
+  const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, log);
   const codeIndex = new PgVectorCodeIndex(
     pool,
     new SidecarEmbeddingProvider(),
     new CocoIndexSidecarRunner(config.databaseUrl),
   );
-  const app = createApp({ store, log: probot.log });
+  const app = createApp({ store, log });
 
   const webhookMiddleware = await createNodeMiddleware(app, {
     probot,
@@ -61,7 +65,7 @@ async function main() {
     codeIndex,
     cloneRepo: cloneToTempDir,
     openSandbox: openCodeSandbox,
-    log: probot.log,
+    log,
     runBudgetNanoUsd: config.runBudgetNanoUsd,
   });
 
