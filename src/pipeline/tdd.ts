@@ -69,7 +69,12 @@ export interface TddContext {
 }
 
 export interface TaskOutcome {
-  status: 'done' | 'escalated';
+  /**
+   * `done` — implemented red→green. `already-satisfied` — the task's tests passed before any
+   * implementation with the suite green, i.e. the behavior already exists (a redundant task or one
+   * an earlier task delivered); nothing to commit, not a failure. `escalated` — stalled, needs a human.
+   */
+  status: 'done' | 'escalated' | 'already-satisfied';
   /** Which stage failed, when escalated. */
   stage?: 'test' | 'impl';
   redObserved: boolean;
@@ -181,14 +186,16 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
     `path the plan specifies, resolved correctly from where you place the test.`
   let testFiles: FileEdit[] = [];
   let redObserved = false;
+  let suitePassedPreImpl = false; // saw the suite green WITH the author's tests present
   let lastNotRedOutput = '';
   for (const tier of LADDER) {
     const current = await sandbox.readFiles(ctx.affectedPaths);
     const feedback = lastNotRedOutput
-      ? `\n\nYour previous tests PASSED with no implementation, which violates TDD ordering — ` +
-        `they must fail first. Test runner output (tail):\n${lastNotRedOutput}\n` +
-        `Write tests that assert the new behavior so they fail now. If your test file may not have ` +
-        `been collected by the runner, check its location/naming against the repo config above.`
+      ? `\n\nYour previous tests PASSED with no implementation, so they must fail first (TDD). ` +
+        `Test runner output (tail):\n${lastNotRedOutput}\n` +
+        `If the task's behavior does NOT yet exist, write tests that assert it so they fail now (also ` +
+        `check the test file's location/naming against the repo config so the runner collects it). ` +
+        `If the behavior genuinely ALREADY exists (an earlier task delivered it), the task is redundant.`
       : '';
     const out = await runAgent<FileSet>(
       'test-author',
@@ -211,13 +218,23 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       redObserved = true; // good: the new tests fail before any implementation
       break;
     }
+    suitePassedPreImpl = true; // suite is green with these tests present → behavior already exists
     lastNotRedOutput = result.outputTail;
     log.info({ runId, task: task.id, status: result.status }, 'Test-author tests did not go red; retrying');
   }
-  testFiles.forEach((f) => touched.add(f.path));
   if (!redObserved) {
+    // The tests never went red. If the suite is green with the author's tests present, the behavior
+    // already exists (a redundant task / one an earlier task delivered): mark it done and skip —
+    // nothing to implement or commit — rather than dead-ending the run. Otherwise (no tests were
+    // ever produced) we can't confirm anything: escalate.
+    if (suitePassedPreImpl) {
+      log.info({ runId, task: task.id }, 'Task already satisfied (tests green pre-impl); skipping');
+      return { status: 'already-satisfied', redObserved: false, greenObserved: true, changedPaths: [] };
+    }
+    testFiles.forEach((f) => touched.add(f.path));
     return { status: 'escalated', stage: 'test', redObserved: false, greenObserved: false, changedPaths: [...touched], lastFailureOutput: lastNotRedOutput };
   }
+  testFiles.forEach((f) => touched.add(f.path));
 
   // --- Implementer: minimum code so the new tests pass AND the full suite stays green. ---
   let greenObserved = false;

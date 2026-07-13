@@ -64,7 +64,7 @@ deterministic code.
   (`src/llm/gateway.ts`); a run refuses further spend once its budget is exhausted and
   stops gracefully.
 - Bounded loops everywhere: the plan-revision cap, the fix-round cap, the TDD escalation
-  ladder (Sonnet → Opus → human), and — as of Phase 11 — a job-retry cap with exponential
+  ladder (Sonnet → human), and — as of Phase 11 — a job-retry cap with exponential
   backoff and a stale-run sweeper that closes abandoned runs. Nothing loops unbounded.
 
 ## 6. Reporting

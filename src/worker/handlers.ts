@@ -973,6 +973,21 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
         return;
       }
 
+      // Already satisfied — the task's behavior already exists (redundant / delivered by an earlier
+      // task). Nothing to implement or commit; mark it done and move on rather than dead-ending.
+      if (outcome.status === 'already-satisfied') {
+        await store.updateTask(task.id, { status: 'done', redObserved: false, greenObserved: true });
+        if (implHelp && implHelp.taskId === task.id) {
+          run.context.implHelp = undefined;
+          await store.updateRunContext(run.id, { ...run.context });
+        }
+        log.info(
+          { runId: run.id, repo: repoLabel, task: task.id },
+          'Task already satisfied; skipped (behavior already present)',
+        );
+        continue;
+      }
+
       // Done — commit the task's files as one commit on the working branch.
       const changed = await sandbox.readFiles(outcome.changedPaths);
       const commit = await commitTaskFiles(github, {
@@ -1278,6 +1293,17 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
         await reply(renderFixEscalationComment(outcome.lastFailureOutput));
         await store.updateRunState(run.id, RunState.Failed);
         log.warn({ runId: run.id, repo: repoLabel, stage: outcome.stage }, 'Fix could not land; escalating');
+        return;
+      }
+
+      // Already satisfied — a test for the concern passes without any change, so the behavior is
+      // already in place. Reply, don't commit, don't consume a round; stay open for another look.
+      if (outcome.status === 'already-satisfied') {
+        await reply(
+          'This looks like it is already handled — a test for the concern passes without any code ' +
+            'change, so no commit was made. Let me know if I misread the request.',
+        );
+        log.info({ runId: run.id, repo: repoLabel }, 'Fix concern already satisfied; no change');
         return;
       }
 

@@ -59,11 +59,24 @@ describe('runTaskTdd', () => {
     expect(outcome.changedPaths.sort()).toEqual(['src/add.test.ts', 'src/add.ts']);
   });
 
-  it('rejects a task whose tests pass before implementation (TDD ordering enforced)', async () => {
+  it('treats a task whose tests pass pre-impl (suite green) as already-satisfied and skips it', async () => {
     const provider = new FakeLlmProvider();
-    // Every test-author attempt yields tests; sandbox says they pass → TDD violation each time.
+    // Every test-author attempt yields tests; sandbox says the suite passes → behavior already exists.
     provider.always = textResponse(files('src/add.test.ts', 'test'));
     const sandbox = new FakeCodeSandbox(Array(SONNET_ATTEMPTS + OPUS_ATTEMPTS).fill('passed') as TestRunStatus[]);
+
+    const outcome = await runTaskTdd(task, await ctx(store, provider, sandbox));
+
+    expect(outcome.status).toBe('already-satisfied');
+    expect(outcome.redObserved).toBe(false);
+    expect(outcome.greenObserved).toBe(true);
+    expect(outcome.changedPaths).toEqual([]); // nothing committed for a redundant task
+  });
+
+  it('escalates at the test stage when the author never produces any tests', async () => {
+    const provider = new FakeLlmProvider();
+    provider.always = textResponse(JSON.stringify({ files: [] })); // never any tests
+    const sandbox = new FakeCodeSandbox();
 
     const outcome = await runTaskTdd(task, await ctx(store, provider, sandbox));
 

@@ -208,7 +208,7 @@ I/O schema. There is no LangGraph or agent framework.
 | --- | --- | --- |
 | `triage` | `claude-haiku-4-5` | intake, clarifier, fix-triage |
 | `implementation` | `claude-sonnet-4-6` | decomposer, test-author, implementer, refactor |
-| `review` | `claude-opus-4-8` | product-owner, architect, reviewer (and the escalation rung) |
+| `review` | `claude-opus-4-8` | product-owner, architect, reviewer |
 
 ### 2.6 LLM gateway — the single instrumented chokepoint
 
@@ -232,14 +232,16 @@ identical across calls and marked cacheable, cutting input cost on repeated pref
 ordering**:
 
 1. **Test Author** writes tests; the orchestrator runs them in the sandbox and **asserts they
-   fail** (red). A test that passes pre-implementation is rejected.
+   fail** (red). If the tests instead pass with the suite green (the behavior already exists —
+   e.g. a redundant task), the task is marked **already-satisfied** and skipped rather than forced.
 2. **Implementer** writes the minimum code; accepted only when the new tests pass **and** the
    full suite stays green.
 3. **Refactor** cleans up (best-effort) and is **reverted** if it breaks green.
 
-An **escalation ladder** retries on the cheap model (Sonnet ×2), promotes to Opus (×1), then
-**escalates to a human** rather than looping. The per-run budget is checked at every task
-boundary; a spent budget stops at a safe point.
+An **escalation ladder** retries on Sonnet (×2), then **escalates to a human** rather than
+looping (Opus is intentionally out of the loop — too expensive for a stall that's usually a
+context/spec problem). The per-run budget is checked at every task boundary; a spent budget
+stops at a safe point.
 
 ### 2.8 Sandbox — running untrusted code
 
@@ -259,6 +261,11 @@ no API key) into the `code_chunks` table → agents query via a pgvector ANN sea
 HNSW index) scoped to a per-run `namespace` → vectors and checkout are **dropped at run end**.
 No incrementality, no persistent checkout (deferred post-MVP). CocoIndex is the locked engine
 behind a `CodeIndex` interface; the core pipeline still runs without it.
+
+Alongside semantic retrieval, a cheap **repo map** ([`src/pipeline/repo-map.ts`](src/pipeline/repo-map.ts))
+— the file tree (`git ls-files`) + a summarized `package.json` — gives the Architect, test-author,
+and implementer *structural* context (map = structure, retrieval = depth), so they plan against real
+files and copy the repo's real import/test conventions instead of guessing.
 
 ### 2.10 The deterministic Integrator (the safety wall)
 

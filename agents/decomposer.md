@@ -50,6 +50,19 @@ focused attempts, but never so small that it can't be observed green on its own:
   If a task would carry many ACs only because the underlying function is genuinely large, keep it as
   one task and rely on the attempt ladder — do not manufacture un-greenable slices to lower the count.
 
+**No redundant tasks — every task must be able to go RED.** The harness writes a failing test for
+each task and requires it to fail *before* implementation. So a task whose behavior is **already
+delivered by an earlier task** (or already exists in the codebase) can never go red — its test passes
+immediately, and the loop stalls. Therefore:
+
+- Each task must introduce behavior that does **not** already exist after the earlier tasks land. If
+  two tasks would be verified by the same assertion, they are the **same task** — merge them.
+- Do NOT add a "verify / integrate / wire together / end-to-end" task on top of tasks that already
+  fully implement the behavior — the earlier tasks' tests already prove it; a follow-up task has
+  nothing new to make red.
+- When the whole change is genuinely one cohesive behavior, emit **exactly one task**. One task is the
+  correct answer for a small feature — do not pad to a second task.
+
 ## Output
 
 Return only the structured object: `tasks`. No prose.
