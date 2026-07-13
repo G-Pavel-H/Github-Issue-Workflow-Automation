@@ -161,6 +161,28 @@ Keep this current. It's the source of truth for what's done and what's next.
     that vitest's `include: ['test/**']` never ran → vacuously green). (`agents/test-author.md`)
   - **Ops** — console logger wired through (Probot's was null); CocoIndex retrieval made best-effort.
     All green (197 pass / 23 skip), typecheck + lint clean.
+- 2026-07-13 (post-go-live): **Repo context for the agents + cheaper TDD loop.** A live run stalled
+  because the test-author wrote `test/costSummary.test.ts` importing `../../src/costSummary` (correct
+  is `../src/costSummary`) — it copied the `../../src/` depth from this repo's *nested* tests without
+  adjusting for a top-level file. An unresolvable import fails the suite to *load*, which the loop
+  reads as a valid TDD red, so the implementer is handed a task it can never green (it can't edit the
+  test) → escalate. A **false red**. Fixes:
+  - **Repo-map backbone** (`src/pipeline/repo-map.ts`): a cheap structural view (file tree via
+    `git ls-files` + summarized package.json), distinct from CocoIndex's semantic retrieval (map =
+    structure, retrieval = depth). Injected into the **Architect** (plan step — addresses "the
+    architect plans blind from the issue"; it already had the checkout, so free) and the
+    **test-author + implementer** (from the sandbox).
+  - **Test-author gets real example test files** (`gatherRepoContext` in `tdd.ts` via a new
+    `CodeSandbox.listFiles`) + an explicit **import-resolution rule** ("compute the relative import
+    from your file's own location; an unresolvable import is a FALSE red the implementer can't fix").
+    `agents/test-author.md` updated to match.
+  - **TDD loop is Sonnet-only now**: `SONNET_ATTEMPTS=2`, `OPUS_ATTEMPTS=0` (was 3/2). Opus removed
+    from the escalation ladder — too expensive for this stage; a task Sonnet can't land twice (with
+    the failure fed back) is usually a context/spec problem for a human, not a job for a pricier model.
+  - **Deferred (next step): spec + clarifier repo map.** Same map for intake/PO/clarifier needs a
+    spec-time clone of the *default* branch (the working branch doesn't exist yet) + default-branch
+    resolution — new surface on a stage that wasn't the failure, so held for a follow-up. All green
+    (206 pass / 23 skip, typecheck + lint clean).
 - 2026-07-13 (post-go-live): **CocoIndex re-enabled by rewriting the sidecar for the CocoIndex 1.0
   API.** The live `ModuleNotFoundError` was a host-side dep gap, not an E2B-template issue (CocoIndex
   runs host-side). Deeper cause: `sidecar/cocoindex_flow.py` was written from stale (pre-1.0)

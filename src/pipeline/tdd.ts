@@ -3,21 +3,46 @@ import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import type { ModelTier } from '../llm/models.js';
 import type { Logger } from '../log.js';
 import type { CodeSandbox } from '../sandbox/code-sandbox.js';
+import { renderRepoMap } from './repo-map.js';
 import type { FileEdit, FileSet, TaskList } from './schemas.js';
+
+/** A file looks like a test if it lives in a test dir or carries a .test/.spec suffix. */
+function isTestFile(path: string): boolean {
+  return /(^|\/)(test|tests|__tests__)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
+}
+
+/**
+ * Gather cheap repo context for the authoring agents from the (already-cloned) sandbox: a structural
+ * file map + a couple of real example test files. The examples are the load-bearing fix for wrong
+ * import paths — the author copies the exact import style/depth from a real test instead of guessing.
+ */
+async function gatherRepoContext(
+  sandbox: CodeSandbox,
+  maxExamples = 2,
+): Promise<{ repoMap: string; exampleTests: { path: string; content: string }[] }> {
+  const files = await sandbox.listFiles().catch(() => [] as string[]);
+  const [pkg] = await sandbox.readFiles(['package.json']).catch(() => []);
+  const repoMap = files.length ? renderRepoMap(files, pkg?.content) : '';
+  const exampleTests = files.length
+    ? await sandbox.readFiles(files.filter(isTestFile).slice(0, maxExamples))
+    : [];
+  return { repoMap, exampleTests };
+}
 
 export type TaskSpec = TaskList['tasks'][number];
 
 /**
- * Escalation ladder: try the cheap model first, then promote to Opus, then give up.
- * Sized to give a right-sized single cohesive task (one function / one contract) headroom
- * to land before escalating. Extra attempts only fire on failure, so a task that greens on
- * the first try costs the same as before.
+ * Escalation ladder: try the cheap model (Sonnet) a couple of times, then escalate to a human.
+ * Opus is intentionally NOT in the ladder — it's too expensive for the current stage, and a task
+ * Sonnet can't land twice (with the failure output fed back on the retry) is usually a context or
+ * spec problem a human should look at, not something a pricier model will brute-force. Extra
+ * attempts only fire on failure, so a task that greens on the first try costs the same.
  */
-export const SONNET_ATTEMPTS = 3;
-export const OPUS_ATTEMPTS = 2;
+export const SONNET_ATTEMPTS = 2;
+export const OPUS_ATTEMPTS = 0;
 const LADDER: (ModelTier | undefined)[] = [
   ...Array<undefined>(SONNET_ATTEMPTS).fill(undefined), // role default tier (implementation/Sonnet)
-  ...Array<ModelTier>(OPUS_ATTEMPTS).fill('review'), // promote to Opus
+  ...Array<ModelTier>(OPUS_ATTEMPTS).fill('review'), // (disabled) promote to Opus
 ];
 
 export interface TddContext {
@@ -129,6 +154,11 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
   const baseContext =
     `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}\n\n${taskHeader(task)}${guidanceBlock}`;
 
+  // Repo structure + real example tests, so the authoring agents see what exists and copy the
+  // repo's exact import style/depth instead of guessing (the #1 cause of unresolvable-import stalls).
+  const { repoMap, exampleTests } = await gatherRepoContext(sandbox);
+  const repoMapBlock = repoMap ? `\n\n${repoMap}` : '';
+
   // --- Test Author: write tests that FAIL now (red). A test that passes pre-impl is rejected. ---
   const conventionsBlock = ctx.testConventions
     ? `\n\n## Repo test-runner config (place new test files where this will collect them):\n` +
@@ -136,6 +166,19 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       `If it only collects a top-level test/ tree, put your file there (mirroring the source path), ` +
       `NOT co-located under src/ — a test the runner never collects can never go red.`
     : '';
+  const exampleTestsBlock = exampleTests.length
+    ? `\n\n## Example test files from this repo (copy their import style + relative-path depth exactly):\n` +
+      `${renderFiles(exampleTests)}`
+    : '';
+  // The load-bearing rule: an unresolvable import is a FALSE red the implementer can never fix.
+  const importRule =
+    `\n\n## Imports MUST resolve\n` +
+    `Compute each relative import from YOUR test file's own location to the target module. E.g. a ` +
+    `test at \`test/foo.test.ts\` imports \`src/foo\` as \`../src/foo\`; a test at ` +
+    `\`test/sub/foo.test.ts\` imports it as \`../../src/foo\`. Match the example files above. A test ` +
+    `that fails only because an import can't be resolved is a FALSE red: it looks like TDD red, but ` +
+    `the implementer cannot fix it (it may not edit tests). Import the not-yet-existing module at the ` +
+    `path the plan specifies, resolved correctly from where you place the test.`
   let testFiles: FileEdit[] = [];
   let redObserved = false;
   let lastNotRedOutput = '';
@@ -153,7 +196,7 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
         messages: [
           {
             role: 'user',
-            content: `${baseContext}${conventionsBlock}\n\nCurrent files:\n${renderFiles(current)}${feedback}`,
+            content: `${baseContext}${repoMapBlock}${conventionsBlock}${exampleTestsBlock}${importRule}\n\nCurrent files:\n${renderFiles(current)}${feedback}`,
           },
         ],
         tierOverride: tier,
@@ -193,7 +236,7 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
           {
             role: 'user',
             content:
-              `${baseContext}\n\nFailing tests:\n${renderFiles(testFiles)}\n\n` +
+              `${baseContext}${repoMapBlock}\n\nFailing tests:\n${renderFiles(testFiles)}\n\n` +
               `Current files:\n${renderFiles(current)}${feedback}`,
           },
         ],

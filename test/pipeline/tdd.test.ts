@@ -123,6 +123,26 @@ describe('runTaskTdd', () => {
     expect(JSON.stringify(provider.requests[0])).toContain("include: ['test/**/*.test.ts']");
   });
 
+  it('gives the test-author the repo map, example tests, and the import-resolution rule', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('test/add.test.ts', 'test')), // test-author → red
+      textResponse(files('src/add.ts', 'impl')), // implementer → green
+      textResponse(files('src/add.ts', 'tidy')), // refactor
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed']);
+    // Seed the checkout so gatherRepoContext finds a real example test + package.json.
+    sandbox.files.set('test/existing.test.ts', "import { x } from '../src/x';\n// example");
+    sandbox.files.set('package.json', JSON.stringify({ name: 'demo', scripts: { test: 'vitest' } }));
+
+    await runTaskTdd(task, await ctx(store, provider, sandbox));
+
+    const authorReq = JSON.stringify(provider.requests[0]);
+    expect(authorReq).toContain('Repository file map');
+    expect(authorReq).toContain('test/existing.test.ts'); // example test included
+    expect(authorReq).toContain("import { x } from '../src/x'"); // its import style shown
+    expect(authorReq).toContain('FALSE red'); // the import-resolution rule
+  });
+
   it('carries the last failure output on an impl escalation', async () => {
     const provider = new FakeLlmProvider();
     provider.always = textResponse(files('src/add.ts', 'impl'));
@@ -138,7 +158,7 @@ describe('runTaskTdd', () => {
     expect(outcome.lastFailureOutput).toContain('vitest-failure');
   });
 
-  it('promotes Sonnet → Opus on the escalation ladder before giving up', async () => {
+  it('stays on Sonnet across the ladder and never promotes to Opus (cost control)', async () => {
     const provider = new FakeLlmProvider();
     provider.always = textResponse(files('src/add.test.ts', 'test'));
     const sandbox = new FakeCodeSandbox(Array(SONNET_ATTEMPTS + OPUS_ATTEMPTS).fill('passed') as TestRunStatus[]);
@@ -146,8 +166,9 @@ describe('runTaskTdd', () => {
     await runTaskTdd(task, await ctx(store, provider, sandbox));
 
     const models = provider.requests.map((r) => r.model);
-    expect(models.slice(0, SONNET_ATTEMPTS).every((m) => m === 'claude-sonnet-4-6')).toBe(true);
-    expect(models).toContain('claude-opus-4-8'); // promoted after the Sonnet attempts
+    expect(models.every((m) => m === 'claude-sonnet-4-6')).toBe(true);
+    expect(models).not.toContain('claude-opus-4-8'); // Opus is disabled in the loop
+    expect(models.length).toBe(SONNET_ATTEMPTS); // exactly the Sonnet attempts, then escalate
   });
 });
 

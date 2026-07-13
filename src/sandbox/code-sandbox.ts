@@ -15,6 +15,8 @@ export interface CodeSandbox {
   runTests(): Promise<TestRunResult>;
   /** Read files back from the checkout (missing files are omitted). */
   readFiles(paths: string[]): Promise<{ path: string; content: string }[]>;
+  /** List the checkout's tracked files (repo-relative paths), for repo-map / example lookups. */
+  listFiles(): Promise<string[]>;
   /** Tear the sandbox down. Safe to call once. */
   close(): Promise<void>;
 }
@@ -129,6 +131,15 @@ export async function openCodeSandbox(
         out.push({ path: p, content: Buffer.from(res.stdout.trim(), 'base64').toString('utf-8') });
       }
       return out;
+    },
+
+    async listFiles() {
+      const res = await handle.runCommand('git ls-files', { cwd: CLONE_DIR, timeoutMs });
+      if (res.exitCode !== 0) return [];
+      return res.stdout
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
     },
 
     async close() {

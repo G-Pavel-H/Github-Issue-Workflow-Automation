@@ -31,6 +31,7 @@ import {
 } from '../pipeline/implement.js';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
 import { renderCostSummary } from '../pipeline/cost.js';
+import { buildRepoMap } from '../pipeline/repo-map.js';
 import {
   FIX_ROUND_CAP,
   renderFixCapComment,
@@ -588,11 +589,21 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
     // alone rather than failing the run.
     let chunks: CodeChunk[] = [];
     try {
-      await codeIndex.indexRepo({ namespace, dir: checkout.dir });
+      const indexed = await codeIndex.indexRepo({ namespace, dir: checkout.dir });
       const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join(
         '\n',
       );
       chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
+      log.info(
+        {
+          runId,
+          repo: `${owner}/${repo}`,
+          indexedFiles: indexed.fileCount,
+          indexedChunks: indexed.chunkCount,
+          retrievedChunks: chunks.length,
+        },
+        'Code index ready; retrieved repo context for the plan',
+      );
     } catch (err) {
       log.warn(
         {
@@ -604,8 +615,12 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
       );
     }
 
+    // Structural view of the repo (cheap; complements the semantic retrieval above) so the
+    // Architect plans against real files instead of inventing them. Best-effort.
+    const repoMap = await buildRepoMap(checkout.dir);
     const sections = [
       `Functional spec (markdown):\n${args.specMarkdown}`,
+      repoMap ? repoMap : '## Repository file map\n(unavailable)',
       `Retrieved code context from the repo:\n${
         chunks.length ? renderChunks(chunks) : '(code index unavailable — plan from the spec)'
       }`,

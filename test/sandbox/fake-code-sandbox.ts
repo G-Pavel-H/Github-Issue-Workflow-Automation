@@ -36,6 +36,10 @@ export class FakeCodeSandbox implements CodeSandbox {
     return paths.filter((p) => this.files.has(p)).map((p) => ({ path: p, content: this.files.get(p)! }));
   }
 
+  async listFiles(): Promise<string[]> {
+    return [...this.files.keys()];
+  }
+
   async close(): Promise<void> {
     this.closed += 1;
   }
