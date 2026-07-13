@@ -11,8 +11,8 @@ You install it **once** as a GitHub App; target repos need **no config files**.
   migration, so the extension must be installable.
 - An **Anthropic API key** (model calls).
 - An **E2B API key** (ephemeral sandbox that clones the repo and runs its tests).
-- (Optional, for the code index) Python with CocoIndex available as a sidecar — see
-  `sidecar/`. The core pipeline runs without it; it powers richer plan-time retrieval.
+- (Optional, for the code index) Python 3 with the CocoIndex sidecar deps installed in a venv —
+  see "Code index" below. The core pipeline runs without it; it powers richer plan-time retrieval.
 
 ## 2. Create the GitHub App
 
@@ -53,6 +53,7 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `E2B_API_KEY` | yes | — | Sandbox for clone + test runs. |
 | `E2B_TEMPLATE` | recommended | base image | Custom sandbox template pinned to Node ≥ 22 (see below). Without it, E2B's base image ships Node < 20.12 and `npm test` fails at import for modern-Node repos. |
 | `DATABASE_URL` | yes | — | Postgres connection string (pgvector-capable). |
+| `COCOINDEX_PYTHON` | optional | `python3` | Path to the venv interpreter that has the code-index sidecar deps (see below). Unset → bare `python3`; if that lacks the deps, plan-time code retrieval degrades gracefully. |
 | `RUN_BUDGET_USD` | no | `1.00` | Per-run model-spend ceiling. |
 | `PORT` | no | `3000` | Webhook HTTP port. |
 
@@ -75,6 +76,29 @@ e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile
 
 Then set `E2B_TEMPLATE=tsukinome-node22` (or the printed template id). Leaving it unset falls back to
 the base image and is only safe for target repos that run on old Node.
+
+### Code index (optional CocoIndex sidecar)
+
+The Architect can plan against real repo code when the CocoIndex sidecar is available. It runs
+**host-side** (not in E2B): it tree-sitter-chunks the checkout, embeds each chunk with a local
+model (`all-MiniLM-L6-v2`, no API key, ~$0), and writes rows into `code_chunks`. Retrieval and
+teardown are owned in TypeScript. This is **optional** — with it unavailable the pipeline still
+runs and simply plans from the spec without repo retrieval.
+
+Install the deps into a venv and point the app at that interpreter:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r sidecar/requirements.txt
+```
+
+Then set `COCOINDEX_PYTHON=/absolute/path/to/.venv/bin/python`. The sidecar needs `DATABASE_URL`
+to reach the same pgvector Postgres (the app passes it through automatically). The first run
+downloads the embedding model and installs torch, so it is slow; subsequent runs are fast.
+
+> CocoIndex is pinned to the `1.0.x` API line (`sidecar/requirements.txt`); 1.0 was a full rewrite
+> of the pre-1.0 flow API. To verify the sidecar end to end, run the gated integration test:
+> `COCOINDEX_TEST=1 COCOINDEX_PYTHON=$PWD/.venv/bin/python NODE_OPTIONS='-r dotenv/config' npx vitest run test/index/cocoindex.integration.test.ts`.
 
 ## 4. Migrate and run
 

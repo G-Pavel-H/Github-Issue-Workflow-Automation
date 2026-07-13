@@ -39,8 +39,8 @@ async function main() {
   const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, log);
   const codeIndex = new PgVectorCodeIndex(
     pool,
-    new SidecarEmbeddingProvider(),
-    new CocoIndexSidecarRunner(config.databaseUrl),
+    new SidecarEmbeddingProvider({ python: config.cocoindexPython }),
+    new CocoIndexSidecarRunner(config.databaseUrl, { python: config.cocoindexPython }),
   );
   const app = createApp({ store, log });
 

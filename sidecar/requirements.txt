@@ -1,4 +1,12 @@
-# Tsukinome code-index sidecar (Phase 6). Install into a venv where the worker can
-# reach `python3`:  python3 -m venv .venv && .venv/bin/pip install -r sidecar/requirements.txt
-cocoindex
+# Tsukinome code-index sidecar (Phase 6). Install into a venv, then point the app at that
+# interpreter via COCOINDEX_PYTHON (see docs/setup.md):
+#   python3 -m venv .venv && .venv/bin/pip install -r sidecar/requirements.txt
+#
+# cocoindex is pinned to the 1.0 API line — 1.0 was a full rewrite (the old flow_def/sources/
+# targets API is gone), and the sidecar uses 1.0's cocoindex.ops.text.RecursiveSplitter /
+# cocoindex.ops.code.CodeSource for tree-sitter chunking. A future 2.0 could break again.
+cocoindex>=1.0,<2
 sentence-transformers
+# psycopg (v3) — the sidecar writes chunk rows into code_chunks itself (cocoindex 1.0 no longer
+# manages the target table, and this keeps code_chunks owned by migration 006).
+psycopg[binary]>=3,<4

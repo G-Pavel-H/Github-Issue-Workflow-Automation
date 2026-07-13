@@ -4,6 +4,10 @@ build/
 coverage/
 *.log
 
+# Python venv for the CocoIndex code-index sidecar (see sidecar/requirements.txt)
+.venv/
+__pycache__/
+
 # env / secrets
 .env
 .env.*

@@ -41,8 +41,8 @@ async function main(): Promise<void> {
   const ns = namespaceFor({ owner, repo, runId: 0 });
   const index = new PgVectorCodeIndex(
     pool,
-    new SidecarEmbeddingProvider(),
-    new CocoIndexSidecarRunner(config.databaseUrl),
+    new SidecarEmbeddingProvider({ python: config.cocoindexPython }),
+    new CocoIndexSidecarRunner(config.databaseUrl, { python: config.cocoindexPython }),
   );
 
   try {

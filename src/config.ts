@@ -11,6 +11,13 @@ export interface Config {
    * to a custom template pinned to Node ≥ 22 (see e2b.Dockerfile / docs/setup.md). Unset → base image.
    */
   e2bTemplate?: string;
+  /**
+   * Optional path to the Python interpreter that has the CocoIndex sidecar deps installed
+   * (`sidecar/requirements.txt`). The sidecar runs host-side, not in E2B — set this to a venv's
+   * interpreter (e.g. `.venv/bin/python`) so `import cocoindex` resolves. Unset → bare `python3` on
+   * PATH; if that lacks the deps, code retrieval degrades gracefully (best-effort, plans from spec).
+   */
+  cocoindexPython?: string;
   port: number;
   /** Per-run budget ceiling in nano-USD. Default $1.00. Override via RUN_BUDGET_USD. */
   runBudgetNanoUsd: number;
@@ -52,6 +59,7 @@ export function loadConfig(): Config {
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
     e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
+    cocoindexPython: process.env.COCOINDEX_PYTHON?.trim() || undefined,
     port: parseInt(process.env.PORT ?? '3000', 10),
     runBudgetNanoUsd: parseRunBudgetNanoUsd(process.env.RUN_BUDGET_USD),
   };

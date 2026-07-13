@@ -29,20 +29,25 @@ Keep this current. It's the source of truth for what's done and what's next.
   cutting:** pull the actual `llm_calls` cost breakdown from a real run — Opus mostly hits the
   low-token spec/plan/review calls, so it may be a small share of spend; consider keeping Opus on
   *plan only*. Decide against measured data, not a guess.
-- **⏸️ CocoIndex disabled (needs review).** Currently best-effort/off. Safe — per-run indexing was
-  always the MVP nice-to-have, and the pipeline runs without it (plan-time retrieval degrades, nothing
-  breaks). The live failure is `ModuleNotFoundError: No module named 'cocoindex'` — the Python sidecar
-  dep isn't installed, not a code bug. Re-enabling it is the plan-of-record fix for the bad-AC item
-  below (gives the Opus Architect real code to plan against): install the sidecar deps, confirm the
-  exact CocoIndex API surface, then turn it back on.
+- **✅ CocoIndex re-enabled (2026-07-13).** Root cause was **not** the E2B template (CocoIndex runs
+  host-side, not in the sandbox) — the host `python3` just never had the deps, and the sidecar was
+  written against a **pre-1.0 CocoIndex API** that no longer exists (1.0 was a full rewrite). Fixed:
+  added a `COCOINDEX_PYTHON` config knob (points the sidecar at a venv), and **rewrote
+  `sidecar/cocoindex_flow.py` for the 1.0 API** — it now uses CocoIndex purely for tree-sitter
+  chunking (`ops.text.RecursiveSplitter` + `ops.code.CodeSource`), embeds locally, and writes rows to
+  `code_chunks` itself via psycopg (so migration 006 still owns the table; no CocoIndex target
+  machinery). Verified end to end against live Neon and the gated integration test passes. See the
+  2026-07-13 decision-log entry. Retrieval remains best-effort — with the venv unset the pipeline
+  still runs and plans from the spec.
 
-- **⏸️ Bad/unsatisfiable ACs should be caught up front (blocked on CocoIndex).** An impossible
+- **⏸️ Bad/unsatisfiable ACs should be caught up front (CocoIndex now available).** An impossible
   acceptance criterion (e.g. "wire into a field that doesn't exist") should be caught by the **Opus**
-  Architect, not fail the TDD loop. It can't today because with CocoIndex off it plans blind. Plan of
-  record: re-enable CocoIndex so the Architect sees real code and reshapes impossible ACs before they
-  reach the loop; the human-help gate is the stopgap until then. (Subtler trap to keep in mind: an AC
-  that requires changing **already-tested** output is un-greenable because the implementer can't edit
-  existing tests — the loop could detect "my change broke a *pre-existing* test" and route back.)
+  Architect, not fail the TDD loop. CocoIndex is now working (above), so the Architect *can* see real
+  code — but the AC-reshaping behavior itself isn't implemented yet; the human-help gate remains the
+  stopgap. Next step: feed retrieved code into the Architect's reasoning and have it reshape/flag
+  impossible ACs before the loop. (Subtler trap to keep in mind: an AC that requires changing
+  **already-tested** output is un-greenable because the implementer can't edit existing tests — the
+  loop could detect "my change broke a *pre-existing* test" and route back.)
 
 ## Locked decisions
 
@@ -156,6 +161,25 @@ Keep this current. It's the source of truth for what's done and what's next.
     that vitest's `include: ['test/**']` never ran → vacuously green). (`agents/test-author.md`)
   - **Ops** — console logger wired through (Probot's was null); CocoIndex retrieval made best-effort.
     All green (197 pass / 23 skip), typecheck + lint clean.
+- 2026-07-13 (post-go-live): **CocoIndex re-enabled by rewriting the sidecar for the CocoIndex 1.0
+  API.** The live `ModuleNotFoundError` was a host-side dep gap, not an E2B-template issue (CocoIndex
+  runs host-side). Deeper cause: `sidecar/cocoindex_flow.py` was written from stale (pre-1.0)
+  training knowledge — by the time it was authored CocoIndex had already shipped 1.0, a full rewrite
+  that removed `flow_def`/`sources`/`functions`/`targets`/`init`. Changes:
+  - **`COCOINDEX_PYTHON` config knob** (`src/config.ts`, threaded into `src/index.ts` +
+    `scripts/debug-index-repo.ts` + the gated test) points the sidecar at a venv interpreter with the
+    deps; unset → bare `python3` and retrieval degrades gracefully. TDD (test in `test/config.test.ts`).
+  - **Sidecar rewritten for 1.0**: uses CocoIndex *only* for tree-sitter chunking
+    (`cocoindex.ops.text.RecursiveSplitter` + `cocoindex.ops.code.CodeSource`), embeds locally with
+    `SentenceTransformer` in a plain sequential loop (the 1.0 reactive-component `App`/`mount` model
+    is overkill for a one-shot batch job, and calling the model outside CocoIndex's native parallel
+    executors sidesteps a torch-on-macOS segfault), and INSERTs rows into `code_chunks` itself via
+    **psycopg**. `code_chunks` stays owned by migration 006 — CocoIndex never manages the table, so
+    the shared per-namespace design and TS `dropNamespace` teardown are untouched.
+  - **requirements.txt** pins `cocoindex>=1.0,<2` and adds `psycopg[binary]`. `.venv/` gitignored.
+  - **Verified end to end** against live Neon: indexed this repo's `src/` (40 files → 214 chunks),
+    retrieval ranks `server.ts`/`index.ts` top for an http-server query; the gated integration test
+    (`COCOINDEX_TEST=1`) passes in ~24s. Build stays green (200 pass / 23 skip, typecheck + lint clean).
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)

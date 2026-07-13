@@ -101,4 +101,20 @@ describe('loadConfig', () => {
     Object.assign(process.env, validEnv);
     expect(loadConfig().e2bApiKey).toBe('e2b-fake-key');
   });
+
+  it('leaves cocoindexPython undefined when COCOINDEX_PYTHON is unset', () => {
+    Object.assign(process.env, validEnv);
+    delete process.env.COCOINDEX_PYTHON;
+    expect(loadConfig().cocoindexPython).toBeUndefined();
+  });
+
+  it('parses COCOINDEX_PYTHON (interpreter path) into the config', () => {
+    Object.assign(process.env, validEnv, { COCOINDEX_PYTHON: '/repo/.venv/bin/python' });
+    expect(loadConfig().cocoindexPython).toBe('/repo/.venv/bin/python');
+  });
+
+  it('treats a blank COCOINDEX_PYTHON as unset', () => {
+    Object.assign(process.env, validEnv, { COCOINDEX_PYTHON: '   ' });
+    expect(loadConfig().cocoindexPython).toBeUndefined();
+  });
 });

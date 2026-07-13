@@ -33,9 +33,17 @@ describe.skipIf(!ENABLED)('CocoIndex sidecar (integration)', () => {
   let index: PgVectorCodeIndex;
   const ns = namespaceFor({ owner: 'acme', repo: 'fixture', runId: 999 });
 
+  // Point the sidecar at the venv interpreter that has the deps (matches the COCOINDEX_PYTHON
+  // config knob used in production); falls back to bare python3 when unset.
+  const python = process.env.COCOINDEX_PYTHON;
+
   beforeAll(() => {
     pool = createPool(DATABASE_URL!);
-    index = new PgVectorCodeIndex(pool, new SidecarEmbeddingProvider(), new CocoIndexSidecarRunner(DATABASE_URL!));
+    index = new PgVectorCodeIndex(
+      pool,
+      new SidecarEmbeddingProvider({ python }),
+      new CocoIndexSidecarRunner(DATABASE_URL!, { python }),
+    );
     dir = mkdtempSync(join(tmpdir(), 'tsukinome-coco-'));
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'fib.ts'), sampleFile);
