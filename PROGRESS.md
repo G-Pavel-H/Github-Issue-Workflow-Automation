@@ -49,21 +49,6 @@ Keep this current. It's the source of truth for what's done and what's next.
   **already-tested** output is un-greenable because the implementer can't edit existing tests — the
   loop could detect "my change broke a *pre-existing* test" and route back.)
 
-- **⏸️ Test Author is the most expensive stage — its big context is billed uncached (2026-07-13).**
-  Cost analysis flagged `test-author` as the top spender. Root cause: prompt caching only marks the
-  *system* prefix (`CONSTITUTION` + instruction file) in `src/agents/runner.ts:44`; the large
-  **user-message** payload it uniquely carries — full spec + plan + repo file map + two whole example
-  test files + test-runner config + import rules + whole current affected files (`src/pipeline/tdd.ts`
-  ~200–212) — has **no cache breakpoint**, so it's re-billed at full input price on every ladder
-  attempt (×`SONNET_ATTEMPTS`) and every task, though most of it is identical across all of them. The
-  prompt already appends the variable bits (`current files`, `feedback`) last, so a breakpoint fits
-  naturally. Same uncached payload hits the Implementer.
-  - **Suggestion:** extend `LlmRequest` messages to accept content blocks with `cacheControl` (mirror
-    the existing system-block handling in `anthropic-provider.ts`), then split the Test Author /
-    Implementer user message into a cached run-stable prefix (spec, plan, repo map, example tests,
-    conventions, import rule — reordered ahead of the per-task task header) + an uncached tail, and
-    trim example tests to import lines only. Behavior-neutral; watch `cache_read_tokens` rise.
-
 ## Locked decisions
 
 - Language: TypeScript throughout.
@@ -217,6 +202,30 @@ Keep this current. It's the source of truth for what's done and what's next.
   - **Verified end to end** against live Neon: indexed this repo's `src/` (40 files → 214 chunks),
     retrieval ranks `server.ts`/`index.ts` top for an http-server query; the gated integration test
     (`COCOINDEX_TEST=1`) passes in ~24s. Build stays green (200 pass / 23 skip, typecheck + lint clean).
+- 2026-07-14 (post-go-live): **Test Author / Implementer context now caches — the top spender's big
+  payload was being re-billed uncached.** Cost analysis had flagged `test-author` as the priciest
+  stage: prompt caching only marked the *system* prefix (`CONSTITUTION` + instruction), so the large
+  **user-message** it carries (spec + plan + repo map + example tests + runner config + import rule +
+  current files) was billed at full input price on every ladder attempt and every task, even though
+  nearly all of it is identical across them. Billing-only change — the TDD gate and all behavior are
+  unchanged. Fixes:
+  - **`TextBlock` now accepts `cacheControl?: 'ephemeral'`** (`src/llm/types.ts`) and
+    `AnthropicProvider.toSdkBlock` maps it to `cache_control` (`src/llm/anthropic-provider.ts`),
+    mirroring the existing `SystemBlock` handling. This adds a **second cache breakpoint** on the user
+    message, on top of the system prefix.
+  - **`runTaskTdd` splits both the Test Author and Implementer user messages** (`src/pipeline/tdd.ts`)
+    into a cached **run-stable prefix** (spec, plan, repo map, example tests, conventions, import rule)
+    + an **uncached tail** (per-task header + maintainer guidance, current files, retry feedback). The
+    run-stable prefix is **reordered ahead of the per-task task header**, so it's byte-identical across
+    every task in a run and caches across all of them — not just across a single task's retries.
+  - **Example tests trimmed to file path + import lines** (`renderExampleImports`), not whole file
+    bodies — the author only needs the repo's exact import style + relative-path depth; the bodies
+    were dead weight re-billed on every attempt.
+  - Unit tests assert the stable block ships with `cacheControl: 'ephemeral'` and the variable tail
+    without it (for both roles), that the task header/current files stay out of the cached prefix, and
+    that example-test bodies are dropped while imports are kept. Full suite green (**209 pass / 23
+    skipped**), typecheck + lint clean. Expect `cache_read_tokens` to rise / `test-author` spend to
+    fall on the next live run — verify against real `llm_calls` numbers.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)

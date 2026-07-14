@@ -10,7 +10,11 @@ import type {
 function toSdkBlock(block: MessageBlock): Anthropic.ContentBlockParam {
   switch (block.type) {
     case 'text':
-      return { type: 'text', text: block.text };
+      return {
+        type: 'text',
+        text: block.text,
+        ...(block.cacheControl ? { cache_control: { type: 'ephemeral' as const } } : {}),
+      };
     case 'tool_use':
       return { type: 'tool_use', id: block.id, name: block.name, input: block.input };
     case 'tool_result':

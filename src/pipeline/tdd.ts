@@ -131,6 +131,23 @@ function renderFiles(files: { path: string; content: string }[]): string {
   return files.map((f) => `--- ${f.path} ---\n${f.content}`).join('\n\n');
 }
 
+/**
+ * Render example tests as just their file path + import lines, not the whole file body. The author
+ * only needs the repo's exact import style and relative-path depth; the bodies were dead weight that
+ * got re-billed (uncached) on every ladder attempt of every task.
+ */
+function renderExampleImports(files: { path: string; content: string }[]): string {
+  return files
+    .map((f) => {
+      const imports = f.content
+        .split('\n')
+        .filter((l) => /^\s*(import\b|export\b[^\n]*\bfrom\b|(?:const|let|var)\b[^\n]*\brequire\()/.test(l))
+        .join('\n');
+      return `--- ${f.path} ---\n${imports || '(no imports)'}`;
+    })
+    .join('\n\n');
+}
+
 function taskHeader(task: TaskSpec): string {
   return (
     `Task ${task.id}: ${task.title}\n${task.description}\n\n` +
@@ -156,8 +173,13 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       `adjust exactly that test — but every remaining test must still pass. Do NOT weaken or delete ` +
       `tests merely to make the suite go green.`
     : '';
-  const baseContext =
-    `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}\n\n${taskHeader(task)}${guidanceBlock}`;
+  const specPlan = `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}`;
+  // Refactor (a single best-effort call) keeps the original flat prompt.
+  const baseContext = `${specPlan}\n\n${taskHeader(task)}${guidanceBlock}`;
+  // The per-task tail appended to the cached prefix on the author/implementer calls: the task header
+  // + maintainer guidance are task-specific, so they live in the uncached tail, after the run-stable
+  // prefix, so the prefix caches across every task rather than being invalidated by each task header.
+  const taskTail = `\n\n${taskHeader(task)}${guidanceBlock}`;
 
   // Repo structure + real example tests, so the authoring agents see what exists and copy the
   // repo's exact import style/depth instead of guessing (the #1 cause of unresolvable-import stalls).
@@ -172,8 +194,8 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       `NOT co-located under src/ — a test the runner never collects can never go red.`
     : '';
   const exampleTestsBlock = exampleTests.length
-    ? `\n\n## Example test files from this repo (copy their import style + relative-path depth exactly):\n` +
-      `${renderFiles(exampleTests)}`
+    ? `\n\n## Example test imports from this repo (copy their import style + relative-path depth exactly):\n` +
+      `${renderExampleImports(exampleTests)}`
     : '';
   // The load-bearing rule: an unresolvable import is a FALSE red the implementer can never fix.
   const importRule =
@@ -184,6 +206,9 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
     `that fails only because an import can't be resolved is a FALSE red: it looks like TDD red, but ` +
     `the implementer cannot fix it (it may not edit tests). Import the not-yet-existing module at the ` +
     `path the plan specifies, resolved correctly from where you place the test.`
+  // Run-stable prefix — identical across every task and every ladder attempt, so mark it for prompt
+  // caching (a cache breakpoint after the system prefix). Only the variable tail below is re-billed.
+  const authorStablePrefix = `${specPlan}${repoMapBlock}${conventionsBlock}${exampleTestsBlock}${importRule}`;
   let testFiles: FileEdit[] = [];
   let redObserved = false;
   let suitePassedPreImpl = false; // saw the suite green WITH the author's tests present
@@ -203,7 +228,10 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
         messages: [
           {
             role: 'user',
-            content: `${baseContext}${repoMapBlock}${conventionsBlock}${exampleTestsBlock}${importRule}\n\nCurrent files:\n${renderFiles(current)}${feedback}`,
+            content: [
+              { type: 'text', text: authorStablePrefix, cacheControl: 'ephemeral' },
+              { type: 'text', text: `${taskTail}\n\nCurrent files:\n${renderFiles(current)}${feedback}` },
+            ],
           },
         ],
         tierOverride: tier,
@@ -237,6 +265,9 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
   testFiles.forEach((f) => touched.add(f.path));
 
   // --- Implementer: minimum code so the new tests pass AND the full suite stays green. ---
+  // Same caching split: spec + plan + repo map are run-stable (cached); the task header, the failing
+  // tests, the current files and the retry feedback are the variable tail.
+  const implStablePrefix = `${specPlan}${repoMapBlock}`;
   let greenObserved = false;
   let lastFailureOutput = '';
   for (const tier of LADDER) {
@@ -252,9 +283,15 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
         messages: [
           {
             role: 'user',
-            content:
-              `${baseContext}${repoMapBlock}\n\nFailing tests:\n${renderFiles(testFiles)}\n\n` +
-              `Current files:\n${renderFiles(current)}${feedback}`,
+            content: [
+              { type: 'text', text: implStablePrefix, cacheControl: 'ephemeral' },
+              {
+                type: 'text',
+                text:
+                  `${taskTail}\n\nFailing tests:\n${renderFiles(testFiles)}\n\n` +
+                  `Current files:\n${renderFiles(current)}${feedback}`,
+              },
+            ],
           },
         ],
         tierOverride: tier,

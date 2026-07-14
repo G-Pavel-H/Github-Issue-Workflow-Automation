@@ -15,6 +15,8 @@ export interface SystemBlock {
 export interface TextBlock {
   type: 'text';
   text: string;
+  /** Marks the end of a cacheable prefix (prompt caching), mirroring `SystemBlock.cacheControl`. */
+  cacheControl?: 'ephemeral';
 }
 
 export interface ToolUseBlock {

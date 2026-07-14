@@ -156,6 +156,56 @@ describe('runTaskTdd', () => {
     expect(authorReq).toContain('FALSE red'); // the import-resolution rule
   });
 
+  it('sends the run-stable context as a cached block and the per-task tail uncached', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('test/add.test.ts', 'test')), // test-author → red
+      textResponse(files('src/add.ts', 'impl')), // implementer → green
+      textResponse(files('src/add.ts', 'tidy')), // refactor
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed']);
+
+    await runTaskTdd(task, await ctx(store, provider, sandbox));
+
+    // Both the test-author (request 0) and the implementer (request 1) split their user message
+    // into a cached run-stable prefix (spec/plan/etc.) + an uncached, per-task/per-attempt tail.
+    for (const idx of [0, 1]) {
+      const content = provider.requests[idx]!.messages[0]!.content;
+      expect(Array.isArray(content)).toBe(true);
+      const blocks = content as { type: string; text: string; cacheControl?: string }[];
+      const [stable, tail] = blocks;
+      // Cached run-stable prefix: carries the spec + plan, marked for prompt caching.
+      expect(stable!.cacheControl).toBe('ephemeral');
+      expect(stable!.text).toContain('# spec');
+      expect(stable!.text).toContain('# plan');
+      expect(stable!.text).not.toContain('Task T1'); // per-task header is NOT in the cached prefix
+      expect(stable!.text).not.toContain('Current files:'); // variable content stays out of the cache
+      // Uncached variable tail: the per-task header + the current files.
+      expect(tail!.cacheControl).toBeUndefined();
+      expect(tail!.text).toContain('Task T1');
+      expect(tail!.text).toContain('Current files:');
+    }
+  });
+
+  it('trims example tests to their import lines, not whole file bodies', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('test/add.test.ts', 'test')), // test-author → red
+      textResponse(files('src/add.ts', 'impl')), // implementer → green
+      textResponse(files('src/add.ts', 'tidy')), // refactor
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed']);
+    sandbox.files.set(
+      'test/existing.test.ts',
+      "import { x } from '../src/x';\n\ndescribe('x', () => { it('UNIQUEBODYMARKER', () => {}); });",
+    );
+    sandbox.files.set('package.json', JSON.stringify({ name: 'demo', scripts: { test: 'vitest' } }));
+
+    await runTaskTdd(task, await ctx(store, provider, sandbox));
+
+    const authorReq = JSON.stringify(provider.requests[0]);
+    expect(authorReq).toContain("import { x } from '../src/x'"); // import lines kept
+    expect(authorReq).not.toContain('UNIQUEBODYMARKER'); // file body dropped
+  });
+
   it('carries the last failure output on an impl escalation', async () => {
     const provider = new FakeLlmProvider();
     provider.always = textResponse(files('src/add.ts', 'impl'));
