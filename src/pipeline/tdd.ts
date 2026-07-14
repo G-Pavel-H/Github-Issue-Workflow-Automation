@@ -174,9 +174,7 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       `tests merely to make the suite go green.`
     : '';
   const specPlan = `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}`;
-  // Refactor (a single best-effort call) keeps the original flat prompt.
-  const baseContext = `${specPlan}\n\n${taskHeader(task)}${guidanceBlock}`;
-  // The per-task tail appended to the cached prefix on the author/implementer calls: the task header
+  // The per-task tail appended to the cached prefix on the author/implementer/refactor calls: the task header
   // + maintainer guidance are task-specific, so they live in the uncached tail, after the run-stable
   // prefix, so the prefix caches across every task rather than being invalidated by each task header.
   const taskTail = `\n\n${taskHeader(task)}${guidanceBlock}`;
@@ -318,7 +316,17 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
     const greenSnapshot = await sandbox.readFiles([...touched]);
     const out = await runAgent<FileSet>(
       'refactor',
-      { messages: [{ role: 'user', content: `${baseContext}\n\nCurrent files:\n${renderFiles(greenSnapshot)}` }] },
+      {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `${specPlan}${repoMapBlock}`, cacheControl: 'ephemeral' },
+              { type: 'text', text: `${taskTail}\n\nCurrent files:\n${renderFiles(greenSnapshot)}` },
+            ],
+          },
+        ],
+      },
       agentCtx,
     );
     const refFiles = out.output!.files;

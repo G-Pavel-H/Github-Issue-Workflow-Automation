@@ -166,9 +166,10 @@ describe('runTaskTdd', () => {
 
     await runTaskTdd(task, await ctx(store, provider, sandbox));
 
-    // Both the test-author (request 0) and the implementer (request 1) split their user message
-    // into a cached run-stable prefix (spec/plan/etc.) + an uncached, per-task/per-attempt tail.
-    for (const idx of [0, 1]) {
+    // The test-author (request 0), the implementer (request 1) and the refactor (request 2) each
+    // split their user message into a cached run-stable prefix (spec/plan/etc.) + an uncached,
+    // per-task/per-attempt tail.
+    for (const idx of [0, 1, 2]) {
       const content = provider.requests[idx]!.messages[0]!.content;
       expect(Array.isArray(content)).toBe(true);
       const blocks = content as { type: string; text: string; cacheControl?: string }[];

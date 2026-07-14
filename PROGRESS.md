@@ -202,8 +202,10 @@ Keep this current. It's the source of truth for what's done and what's next.
   - **Verified end to end** against live Neon: indexed this repo's `src/` (40 files → 214 chunks),
     retrieval ranks `server.ts`/`index.ts` top for an http-server query; the gated integration test
     (`COCOINDEX_TEST=1`) passes in ~24s. Build stays green (200 pass / 23 skip, typecheck + lint clean).
-- 2026-07-14 (post-go-live): **Test Author / Implementer context now caches — the top spender's big
-  payload was being re-billed uncached.** Cost analysis had flagged `test-author` as the priciest
+- 2026-07-14 (post-go-live): **The TDD trio's run-stable context now caches — test-author, implementer
+  and refactor** (refactor cached in a follow-up; see the second 2026-07-14 line below). The top
+  spender's big payload was being re-billed uncached. Cost analysis had flagged `test-author` as the
+  priciest
   stage: prompt caching only marked the *system* prefix (`CONSTITUTION` + instruction), so the large
   **user-message** it carries (spec + plan + repo map + example tests + runner config + import rule +
   current files) was billed at full input price on every ladder attempt and every task, even though
@@ -226,6 +228,15 @@ Keep this current. It's the source of truth for what's done and what's next.
     that example-test bodies are dropped while imports are kept. Full suite green (**209 pass / 23
     skipped**), typecheck + lint clean. Expect `cache_read_tokens` to rise / `test-author` spend to
     fall on the next live run — verify against real `llm_calls` numbers.
+- 2026-07-14 (post-go-live): **Refactor stage caches too — completes the TDD-trio caching.** The
+  refactor call in `runTaskTdd` (`src/pipeline/tdd.ts`) still sent a single plain-string user message,
+  so its run-stable context wasn't cached. Refactor runs once per task, so across the tasks of one
+  implement job its prefix repeats inside the cache window — a cache read, not a re-bill. Split it into
+  the same `[cached stable prefix, variable tail]` shape the implementer uses: cached block
+  `${specPlan}${repoMapBlock}` (`cacheControl: 'ephemeral'`) + an uncached tail (`taskTail` + current
+  files). Behavior-neutral — same content, reordered; the now-unused `baseContext` var was removed. The
+  existing caching unit test was extended to assert the refactor request (index 2) also splits stable
+  vs. tail. Full suite green (**209 pass / 23 skipped**), typecheck + lint clean.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)
