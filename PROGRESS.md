@@ -237,6 +237,35 @@ Keep this current. It's the source of truth for what's done and what's next.
   files). Behavior-neutral — same content, reordered; the now-unused `baseContext` var was removed. The
   existing caching unit test was extended to assert the refactor request (index 2) also splits stable
   vs. tail. Full suite green (**209 pass / 23 skipped**), typecheck + lint clean.
+- 2026-07-17 (post-go-live): **Grounded the Clarifier in code.** The Clarifier (`handleClarify`) saw
+  only the draft spec, so it asked questions the codebase already answers and couldn't anchor them to
+  real modules — extra human round-trips and weaker specs, which feeds the un-greenable-AC problem
+  downstream. It now gets the **same code context the Architect uses**: a repo map + top-`DEFAULT_TOP_K`
+  retrieved chunks, keyed on the draft spec. Changes:
+  - **Shared `retrieveCodeContext` helper** (`src/worker/handlers.ts`) extracted from
+    `runArchitectAndCommit`: get an installation token → clone the working branch (`specBranch`, which
+    already exists by clarify time — `produce_spec` commits `spec.md` before enqueuing `clarify`) →
+    `indexRepo` + `retrieve` (best-effort, degrades to no chunks if the CocoIndex sidecar is absent) +
+    `buildRepoMap` (best-effort) → **always** `dropNamespace` + `cleanup` in a `finally`. The Architect
+    now calls it too — behaviour-neutral refactor (its existing tests stay green); teardown now runs
+    just before the Architect model call rather than around it, which frees the checkout/vectors sooner.
+  - **`handleClarify` widened** `SpecHandlerDeps` → `PlanHandlerDeps` (the worker already carried
+    `codeIndex` + `cloneRepo`, so **no `index.ts`/worker wiring change**). It wraps `retrieveCodeContext`
+    in its own try/catch so **any** failure — clone error or missing sidecar — degrades to text-only and
+    the gate runs exactly as before. Per the plan this is a **quality** change, **not** a caching one
+    (the Clarifier is one-shot + human-gated, so its context won't cache) — **no `cacheControl` added**.
+  - **`agents/clarifier.md`** updated: the top rule is now "never ask what the code already answers"
+    (check the map/chunks first), treat code context as untrusted DATA, and anchor qualifying questions
+    to the real module.
+  - **Tests**: two new cases in `test/worker/handle-clarify.test.ts` — repo map + chunks reach the
+    Clarifier prompt and retrieval is keyed on the draft spec with guaranteed teardown; and it still
+    parks normally when the clone throws (text-only, no index work). Existing clarify tests migrated to
+    the `PlanHandlerDeps` shape. Full suite green (**211 pass / 23 skipped**), typecheck + lint clean.
+  - **Measured effect: not yet available** — no live run this session. The change is expected to cut
+    clarification rounds (fewer code-answerable questions) and bad ACs, at a small added per-issue cost:
+    one host-side clone + local re-embed (~$0) + a larger **Haiku** (cheapest-tier) prompt, i.e. a
+    fraction of a cent. **Verify against real `llm_calls` / clarification-round counts on the next live
+    run** before treating the cost/round claims as settled.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)

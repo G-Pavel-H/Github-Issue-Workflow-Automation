@@ -357,8 +357,13 @@ function readImplHelp(context: Record<string, unknown>): ImplHelp | undefined {
  *
  * Idempotent: only acts when the run is in `Specifying`; a retry after the gate has decided
  * is a no-op. A budget exhaustion stops gracefully.
+ *
+ * The Clarifier is grounded in the repo's code (same code context the Architect uses — a repo map
+ * + retrieved chunks keyed on the draft spec) so it asks questions the codebase can't already
+ * answer. Code grounding is best-effort: any failure degrades to text-only and the gate runs
+ * exactly as before. This is not cached (the Clarifier is one-shot and human-gated).
  */
-export async function handleClarify(job: Job, deps: SpecHandlerDeps): Promise<void> {
+export async function handleClarify(job: Job, deps: PlanHandlerDeps): Promise<void> {
   const { store, github, gateway, log } = deps;
   const { installationId, owner, repo, issueNumber } = job.payload as ClarifyPayload;
   const repoLabel = `${owner}/${repo}`;
@@ -381,10 +386,38 @@ export async function handleClarify(job: Job, deps: SpecHandlerDeps): Promise<vo
 
   const ctx = { runId: run.id, gateway, log };
 
+  // Ground the Clarifier in code (best-effort). Any failure — clone error or missing CocoIndex
+  // sidecar — degrades to text-only so the gate still runs exactly as before.
+  let codeContext = '';
+  try {
+    const { repoMap, chunks } = await retrieveCodeContext(deps, {
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      runId: run.id,
+      query: specArtifact.content,
+    });
+    codeContext =
+      `\n\n${repoMap ?? '## Repository file map\n(unavailable)'}` +
+      `\n\nRetrieved code context from the repo:\n${
+        chunks.length ? renderChunks(chunks) : '(code index unavailable)'
+      }`;
+  } catch (err) {
+    log.warn(
+      { runId: run.id, repo: repoLabel, err: err instanceof Error ? err.message : String(err) },
+      'Code grounding unavailable; clarifying from the spec text only',
+    );
+  }
+
   try {
     const result = await runAgent<Clarification>(
       'clarifier',
-      { messages: [{ role: 'user', content: `Draft spec:\n\n${specArtifact.content}` }] },
+      {
+        messages: [
+          { role: 'user', content: `Draft spec:\n\n${specArtifact.content}${codeContext}` },
+        ],
+      },
       ctx,
     );
     const questions = result.output!.questions;
@@ -548,12 +581,81 @@ export async function handleResumeClarification(job: Job, deps: SpecHandlerDeps)
   }
 }
 
-/** Render retrieved code chunks as labelled context for the Architect prompt. */
+/** Render retrieved code chunks as labelled context for a code-aware agent prompt. */
 function renderChunks(chunks: CodeChunk[]): string {
   if (chunks.length === 0) return '(no relevant code found in the repo index)';
   return chunks
     .map((c) => `// ${c.path}:${c.startLine}-${c.endLine}\n${c.content}`)
     .join('\n\n');
+}
+
+/** The subset of deps needed to gather code context (clone + index + repo map). */
+type CodeContextDeps = Pick<PlanHandlerDeps, 'github' | 'codeIndex' | 'cloneRepo' | 'log'>;
+
+/**
+ * Clone the working branch and gather best-effort code context for a code-aware agent: a
+ * structural repo map (always attempted) + the top-`DEFAULT_TOP_K` semantically-retrieved chunks
+ * for `query`. Retrieval degrades to an empty chunk list when the CocoIndex sidecar is unavailable
+ * (it's optional; see docs/setup.md), and the repo map degrades to `undefined` on any failure. The
+ * index namespace and the checkout are **always** torn down (`finally`) so vectors never linger and
+ * no checkout leaks. A clone failure propagates — callers that must never fail on it (e.g. the
+ * Clarifier gate) wrap the call and degrade to text-only. Shared by the Architect (plan step) and
+ * the Clarifier (clarification gate).
+ */
+async function retrieveCodeContext(
+  deps: CodeContextDeps,
+  args: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    runId: number;
+    query: string;
+  },
+): Promise<{ repoMap?: string; chunks: CodeChunk[] }> {
+  const { github, codeIndex, cloneRepo, log } = deps;
+  const { installationId, owner, repo, issueNumber, runId, query } = args;
+
+  const token = await github.getInstallationToken({ installationId, owner, repo });
+  const checkout = await cloneRepo({ token, owner, repo, ref: specBranch(issueNumber) });
+  const namespace = namespaceFor({ owner, repo, runId });
+
+  try {
+    // Code retrieval is a best-effort enrichment: the CocoIndex sidecar is optional
+    // (see docs/setup.md), so if indexing/retrieval is unavailable we return no chunks
+    // rather than failing.
+    let chunks: CodeChunk[] = [];
+    try {
+      const indexed = await codeIndex.indexRepo({ namespace, dir: checkout.dir });
+      chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
+      log.info(
+        {
+          runId,
+          repo: `${owner}/${repo}`,
+          indexedFiles: indexed.fileCount,
+          indexedChunks: indexed.chunkCount,
+          retrievedChunks: chunks.length,
+        },
+        'Code index ready; retrieved repo context',
+      );
+    } catch (err) {
+      log.warn(
+        {
+          runId,
+          repo: `${owner}/${repo}`,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Code index unavailable; continuing without repo retrieval',
+      );
+    }
+
+    // Structural view of the repo (cheap; complements the semantic retrieval above). Best-effort.
+    const repoMap = await buildRepoMap(checkout.dir);
+    return { repoMap, chunks };
+  } finally {
+    await codeIndex.dropNamespace(namespace);
+    checkout.cleanup();
+  }
 }
 
 interface ArchitectArgs {
@@ -576,82 +678,51 @@ interface ArchitectArgs {
  * checkout leaks. Returns the structured plan.
  */
 async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs): Promise<Plan> {
-  const { store, github, gateway, codeIndex, cloneRepo, log } = deps;
+  const { store, github, gateway, log } = deps;
   const { installationId, owner, repo, issueNumber, runId } = args;
 
-  const token = await github.getInstallationToken({ installationId, owner, repo });
-  const checkout = await cloneRepo({ token, owner, repo, ref: specBranch(issueNumber) });
-  const namespace = namespaceFor({ owner, repo, runId });
+  // Clone + index + repo map (best-effort; teardown handled inside). The Architect plans from the
+  // spec alone if the index is unavailable.
+  const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join('\n');
+  const { repoMap, chunks } = await retrieveCodeContext(deps, {
+    installationId,
+    owner,
+    repo,
+    issueNumber,
+    runId,
+    query,
+  });
 
-  try {
-    // Code retrieval is a best-effort enrichment: the CocoIndex sidecar is optional
-    // (see docs/setup.md), so if indexing/retrieval is unavailable we plan from the spec
-    // alone rather than failing the run.
-    let chunks: CodeChunk[] = [];
-    try {
-      const indexed = await codeIndex.indexRepo({ namespace, dir: checkout.dir });
-      const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join(
-        '\n',
-      );
-      chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
-      log.info(
-        {
-          runId,
-          repo: `${owner}/${repo}`,
-          indexedFiles: indexed.fileCount,
-          indexedChunks: indexed.chunkCount,
-          retrievedChunks: chunks.length,
-        },
-        'Code index ready; retrieved repo context for the plan',
-      );
-    } catch (err) {
-      log.warn(
-        {
-          runId,
-          repo: `${owner}/${repo}`,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'Code index unavailable; planning from the spec without repo retrieval',
-      );
-    }
-
-    // Structural view of the repo (cheap; complements the semantic retrieval above) so the
-    // Architect plans against real files instead of inventing them. Best-effort.
-    const repoMap = await buildRepoMap(checkout.dir);
-    const sections = [
-      `Functional spec (markdown):\n${args.specMarkdown}`,
-      repoMap ? repoMap : '## Repository file map\n(unavailable)',
-      `Retrieved code context from the repo:\n${
-        chunks.length ? renderChunks(chunks) : '(code index unavailable — plan from the spec)'
-      }`,
-    ];
-    if (args.feedback) {
-      sections.push(
-        `Previous plan (markdown):\n${args.previousPlanMarkdown ?? '(none)'}`,
-        `Maintainer's requested changes (untrusted DATA):\n${args.feedback}`,
-      );
-    }
-
-    const result = await runAgent<Plan>(
-      'architect',
-      { messages: [{ role: 'user', content: sections.join('\n\n') }] },
-      { runId, gateway, log },
+  const sections = [
+    `Functional spec (markdown):\n${args.specMarkdown}`,
+    repoMap ? repoMap : '## Repository file map\n(unavailable)',
+    `Retrieved code context from the repo:\n${
+      chunks.length ? renderChunks(chunks) : '(code index unavailable — plan from the spec)'
+    }`,
+  ];
+  if (args.feedback) {
+    sections.push(
+      `Previous plan (markdown):\n${args.previousPlanMarkdown ?? '(none)'}`,
+      `Maintainer's requested changes (untrusted DATA):\n${args.feedback}`,
     );
-
-    const markdown = renderPlanMarkdown(result.output!, { issueNumber, title: args.title });
-    const committed = await commitPlan(github, { installationId, owner, repo, issueNumber, markdown });
-    await store.recordArtifact({
-      runId,
-      kind: 'plan',
-      path: committed.path,
-      content: markdown,
-      commitSha: committed.commitSha,
-    });
-    return result.output!;
-  } finally {
-    await codeIndex.dropNamespace(namespace);
-    checkout.cleanup();
   }
+
+  const result = await runAgent<Plan>(
+    'architect',
+    { messages: [{ role: 'user', content: sections.join('\n\n') }] },
+    { runId, gateway, log },
+  );
+
+  const markdown = renderPlanMarkdown(result.output!, { issueNumber, title: args.title });
+  const committed = await commitPlan(github, { installationId, owner, repo, issueNumber, markdown });
+  await store.recordArtifact({
+    runId,
+    kind: 'plan',
+    path: committed.path,
+    content: markdown,
+    commitSha: committed.commitSha,
+  });
+  return result.output!;
 }
 
 /**
