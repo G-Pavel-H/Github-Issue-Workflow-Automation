@@ -15,6 +15,38 @@ GitHub; there's no external dashboard.
 issue ─► acknowledge ─► spec ─►(clarify?)─► plan ─►[you /approve]─► TDD implement ─► review ─► PR
 ```
 
+The full workflow, with the human gates (highlighted) and the model tier each stage runs on:
+
+```mermaid
+flowchart TD
+    A["Issue opened"] --> B["Intake — triage + language gate · Haiku"]
+    B --> C["Product Owner — draft spec · Opus"]
+    C --> Dq{"Underspecified?"}
+    Dq -- "yes" --> E["Clarifier — ask ≤4 questions · Haiku"]
+    E -- "you reply" --> F["Product Owner — finalize spec · Opus"]
+    Dq -- "no" --> F
+    F --> G["Architect — plan against repo context · Opus"]
+    G --> H{"Plan gate — you /approve"}
+    H -- "/abort" --> X["Aborted"]
+    H -- "change request" --> G
+    H -- "/approve" --> I["Decomposer — split into tasks · Sonnet"]
+    I --> J["TDD loop per task — Test Author → Implementer → Refactor · Sonnet"]
+    J --> K["Reviewer — self-review the diff · Opus"]
+    K --> L["Integrator opens the Pull Request · deterministic"]
+    L --> M{"PR review comment"}
+    M -- "actionable" --> N["Fix-triage → test-first fix · ≤3 rounds"]
+    N --> L
+    M -- "approve & merge" --> Z["Merged"]
+
+    classDef human fill:#e0e7ff,stroke:#4f46e5,color:#111827;
+    classDef done fill:#dcfce7,stroke:#16a34a,color:#111827;
+    class E,H,M human;
+    class Z done;
+```
+
+The blue nodes are where **you** are in the loop — answering clarifications, approving the plan,
+and reviewing the PR. Everything else runs on its own.
+
 - **Clarification gate** (conditional): if the issue is underspecified, Tsukinome asks one
   batched set of questions and waits for your reply.
 - **Plan gate** (always): it commits a `plan.md` and waits for `/approve` (or `/abort`, or a
@@ -65,13 +97,10 @@ This repo is built by **Claude Code**, phase by phase, following `docs/implement
 - `docs/implementation-plan.md` — the full phased build plan.
 - `CLAUDE.md` — the working agreement and locked decisions (auto-loaded each session).
 - `PROGRESS.md` — current status, decisions, and log.
-- `.claude/commands/` — `/next-phase` and `/phase-report` helpers.
+- `.claude/commands/` — `/phase-report` helper.
 
 ```bash
 npm test          # unit tests (gated integration suites skip without their keys/DB)
 npm run lint
 npm run typecheck
 ```
-
-Drive the build from a Claude Code session with `/next-phase`. Work one phase at a time,
-review the PR, and continue only when you're happy.
