@@ -1,4 +1,5 @@
 import type { Logger } from '../log.js';
+import { DEFAULT_TOOLCHAIN, type Toolchain } from '../toolchain/toolchain.js';
 import type {
   CommandResult,
   SandboxProvider,
@@ -19,12 +20,13 @@ export interface RunTestsDeps {
   log: Logger;
   /** Hard timeout for the sandbox and the install/test commands. */
   timeoutMs?: number;
+  /** Language pack driving the install/test commands. Defaults to TypeScript/JavaScript. */
+  toolchain?: Toolchain;
 }
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 const OUTPUT_TAIL_CAP = 4000;
 const CLONE_DIR = 'repo';
-const TEST_COMMAND = 'npm test';
 
 function tail(...parts: string[]): string {
   const combined = parts.filter(Boolean).join('\n');
@@ -58,6 +60,7 @@ function errorResult(
 export async function runTests(input: RunTestsInput, deps: RunTestsDeps): Promise<TestRunResult> {
   const { sandboxProvider, log } = deps;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const toolchain = deps.toolchain ?? DEFAULT_TOOLCHAIN;
   const { token, owner, repo, ref } = input;
 
   const cloneUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
@@ -76,13 +79,13 @@ export async function runTests(input: RunTestsInput, deps: RunTestsDeps): Promis
       return errorResult('clone', cloneLabel, clone, Date.now() - start, clone.stderr || clone.stdout);
     }
 
-    const install = await handle.runCommand('npm ci', { cwd: CLONE_DIR, timeoutMs });
+    const install = await handle.runCommand(toolchain.installCmd, { cwd: CLONE_DIR, timeoutMs });
     if (install.exitCode !== 0) {
-      return errorResult('install', 'npm ci', install, Date.now() - start, tail(install.stdout, install.stderr));
+      return errorResult('install', toolchain.installCmd, install, Date.now() - start, tail(install.stdout, install.stderr));
     }
 
     const testStart = Date.now();
-    const test = await handle.runCommand(TEST_COMMAND, { cwd: CLONE_DIR, timeoutMs });
+    const test = await handle.runCommand(toolchain.testCmd, { cwd: CLONE_DIR, timeoutMs });
     const durationMs = Date.now() - testStart;
     const passed = test.exitCode === 0;
 
@@ -91,7 +94,7 @@ export async function runTests(input: RunTestsInput, deps: RunTestsDeps): Promis
       passed,
       exitCode: test.exitCode,
       durationMs,
-      command: TEST_COMMAND,
+      command: toolchain.testCmd,
       failureStage: passed ? undefined : 'test',
       outputTail: tail(test.stdout, test.stderr),
     };
@@ -99,7 +102,7 @@ export async function runTests(input: RunTestsInput, deps: RunTestsDeps): Promis
     // Unexpected sandbox/infra error mid-run — surface cleanly, never crash the worker.
     const message = err instanceof Error ? err.message : String(err);
     log.error({ owner, repo, ref, err: message }, 'Sandbox error during runTests');
-    return errorResult('test', TEST_COMMAND, null, Date.now() - start, message);
+    return errorResult('test', toolchain.testCmd, null, Date.now() - start, message);
   } finally {
     try {
       await handle.kill();

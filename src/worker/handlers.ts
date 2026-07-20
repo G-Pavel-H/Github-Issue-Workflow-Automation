@@ -21,6 +21,7 @@ import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
 import { decompose, readTestConventions, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
+import { toolchainForLanguage } from '../toolchain/toolchain.js';
 import {
   IMPL_HELP_CAP,
   renderEscalationComment,
@@ -111,8 +112,6 @@ export interface ImplementHandlerDeps extends SpecHandlerDeps {
   openSandbox: OpenCodeSandboxFn;
 }
 
-/** Languages the MVP's TDD loop supports. Others are refused gracefully. */
-const SUPPORTED_LANGUAGES = new Set(['typescript', 'javascript']);
 
 /** The acknowledgement comment posted when Tsukinome picks up an issue. */
 export const ACK_COMMENT_BODY =
@@ -205,15 +204,17 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
 
   await store.updateRunState(run.id, RunState.Specifying);
 
-  // Deterministic language gate — refuse unsupported repos before spending any tokens.
+  // Deterministic capability gate — refuse repos we have no language pack for, before spending
+  // any tokens. A null/blank detected language resolves to the default pack (can't tell → proceed);
+  // a known-but-unsupported language resolves to no pack and is refused gracefully.
   const language = await github.getRepoLanguage({ installationId, owner, repo });
-  if (language && !SUPPORTED_LANGUAGES.has(language.toLowerCase())) {
+  if (!toolchainForLanguage(language)) {
     await github.postIssueComment({
       installationId,
       owner,
       repo,
       issueNumber,
-      body: UNSUPPORTED_COMMENT(language),
+      body: UNSUPPORTED_COMMENT(language ?? 'unknown'),
     });
     await store.updateRunState(run.id, RunState.Unsupported);
     log.info({ runId: run.id, repo: repoLabel, language }, 'Refused unsupported language');

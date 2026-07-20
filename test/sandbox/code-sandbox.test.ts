@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openCodeSandbox, classifyTestRun } from '../../src/sandbox/code-sandbox.js';
+import type { Toolchain } from '../../src/toolchain/toolchain.js';
+import { TYPESCRIPT_JAVASCRIPT } from '../../src/toolchain/toolchain.js';
 import { FakeSandboxProvider, type ScriptedCommand } from './fake-sandbox.js';
 import { silentLog } from '../helpers.js';
 
@@ -41,6 +43,28 @@ describe('openCodeSandbox', () => {
 
     await sandbox.close();
     expect(p.only.killed).toBe(1);
+  });
+
+  it('uses the toolchain install/test commands and reports its testCmd label', async () => {
+    // A stand-in non-TS pack proves the seam: nothing about `npm` is baked into the sandbox.
+    const python: Toolchain = {
+      ...TYPESCRIPT_JAVASCRIPT,
+      id: 'python',
+      installCmd: 'pip install -e .',
+      testCmd: 'pytest',
+    };
+    const p = provider([
+      { match: 'pip install -e .', result: { exitCode: 0, stdout: '', stderr: '' } },
+      { match: 'pytest', result: { exitCode: 0, stdout: 'ok', stderr: '' } },
+    ]);
+    const sandbox = await openCodeSandbox(input, { sandboxProvider: p, log: silentLog, toolchain: python });
+
+    expect(p.only.ranAny('pip install -e .')).toBe(true);
+    const result = await sandbox.runTests();
+    expect(p.only.ranAny('pytest')).toBe(true);
+    expect(p.only.ranAny('npm')).toBe(false);
+    expect(result.command).toBe('pytest');
+    await sandbox.close();
   });
 
   it('redacts the token and tears down when the clone fails', async () => {

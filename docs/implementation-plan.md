@@ -364,4 +364,18 @@ A person installs the GitHub App on a fresh repo, opens an issue, answers at mos
 
 **Rough exit criteria (per language pack):** a repo in the target language, with its conventional test runner, goes issue → clarify/plan → **test-first, green PR** end to end; unsupported languages (no pack) are still refused gracefully; the TS/JS path is unchanged.
 
-**Open questions (to review with Claude Code CLI):** which language to do first; per-language sandbox templates vs one multi-toolchain image; how much the test-first loop's grain needs to change per ecosystem (test conventions differ a lot); interaction with the TDD-gate policy work (some ecosystems/issues may fit "direct" better than strict red→green).
+**Delivery — split into two PRs (decided with Claude Code CLI, 2026-07-20).** Phase 13 is too large for one green-and-deployable branch, so it ships as two sub-phases, one branch/PR each:
+
+#### Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor) ✅
+
+Introduce the `Toolchain` interface + a `typescript-javascript` pack encoding today's exact behaviour, plus `toolchainForLanguage(language)` / `detectToolchain(files)` resolvers, and route the previously-hardcoded TS/JS commands through it. No new language, no behaviour change — the existing test suite is the neutrality guard.
+
+- **Build:** `src/toolchain/toolchain.ts` (interface, TS/JS pack, registry, resolvers). Thread the pack through the two sandbox sites (`code-sandbox.ts`, `run-tests.ts` — install/test commands + the result's `command` label), the test-conventions probe (`readTestConventions`), and turn the language gate into a capability check (`SUPPORTED_LANGUAGES` set → `toolchainForLanguage`).
+- **Exit criteria:** whole suite still green with zero behaviour change; a non-TS stand-in pack drives the sandbox's commands in a unit test (proves the seam); the Python-refusal gate test still passes against the capability check.
+- **Deliberately deferred to 13b (kept out of 13a to stay behaviour-neutral):** per-run *selection* wiring (passing a detected toolchain from the handler through `openSandbox`/`TddContext` — pointless with one pack), the repo-map manifest generalization (still reads `package.json` directly), prompt parameterization, and the sidecar `SOURCE_EXT` widening. The pack already carries `projectManifest`/`sourceExts`/`sandboxTemplate` as the seams those will read.
+
+#### Phase 13b — first non-TS pack: **Python**
+
+Add the Python pack (pip/pytest, its test conventions + source extensions + sandbox runtime), wire per-run toolchain selection through the pipeline, widen the sidecar `SOURCE_EXT`, and parameterize the agent prompts by the detected pack's conventions. Exit = a real Python repo goes issue → green, test-first PR; TS/JS unchanged; unsupported languages still refused.
+
+**Open questions (to review with Claude Code CLI):** ~~which language to do first~~ **Python** (decided 2026-07-20); per-language sandbox templates vs one multi-toolchain image (leaning one multi-toolchain image for the MVP); how much the test-first loop's grain needs to change per ecosystem (test conventions differ a lot); interaction with the TDD-gate policy work (some ecosystems/issues may fit "direct" better than strict red→green).

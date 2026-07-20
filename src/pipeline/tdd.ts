@@ -3,6 +3,7 @@ import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import type { ModelTier } from '../llm/models.js';
 import type { Logger } from '../log.js';
 import type { CodeSandbox } from '../sandbox/code-sandbox.js';
+import { DEFAULT_TOOLCHAIN, type Toolchain } from '../toolchain/toolchain.js';
 import { renderRepoMap } from './repo-map.js';
 import type { FileEdit, FileSet, TaskList } from './schemas.js';
 
@@ -104,26 +105,16 @@ export async function decompose(
  * test files where the runner will actually collect them. Prefers a dedicated config file; falls
  * back to package.json (which may carry a `jest` key + the test script). Returns undefined if none.
  */
-export async function readTestConventions(sandbox: CodeSandbox): Promise<string | undefined> {
-  const configs = [
-    'vitest.config.ts',
-    'vitest.config.js',
-    'vitest.config.mts',
-    'vitest.config.mjs',
-    'vite.config.ts',
-    'vite.config.js',
-    'jest.config.ts',
-    'jest.config.js',
-    'jest.config.cjs',
-    'jest.config.mjs',
-    'jest.config.json',
-  ];
-  const found = await sandbox.readFiles(configs);
+export async function readTestConventions(
+  sandbox: CodeSandbox,
+  toolchain: Toolchain = DEFAULT_TOOLCHAIN,
+): Promise<string | undefined> {
+  const found = await sandbox.readFiles(toolchain.testConfigFiles);
   if (found.length > 0) {
     return found.map((f) => `--- ${f.path} ---\n${f.content}`).join('\n\n');
   }
-  const [pkg] = await sandbox.readFiles(['package.json']);
-  return pkg ? `--- package.json ---\n${pkg.content}` : undefined;
+  const [manifest] = await sandbox.readFiles([toolchain.projectManifest]);
+  return manifest ? `--- ${manifest.path} ---\n${manifest.content}` : undefined;
 }
 
 function renderFiles(files: { path: string; content: string }[]): string {

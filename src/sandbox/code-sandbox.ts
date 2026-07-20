@@ -1,4 +1,5 @@
 import type { Logger } from '../log.js';
+import { DEFAULT_TOOLCHAIN, type Toolchain } from '../toolchain/toolchain.js';
 import type { SandboxHandle, SandboxProvider, TestRunResult } from './types.js';
 
 /**
@@ -33,10 +34,11 @@ export interface OpenCodeSandboxDeps {
   sandboxProvider: SandboxProvider;
   log: Logger;
   timeoutMs?: number;
+  /** Language pack driving the install/test commands. Defaults to TypeScript/JavaScript. */
+  toolchain?: Toolchain;
 }
 
 const CLONE_DIR = 'repo';
-const TEST_COMMAND = 'npm test';
 const OUTPUT_TAIL_CAP = 4000;
 export const DEFAULT_SESSION_TIMEOUT_MS = 5 * 60_000;
 
@@ -55,6 +57,7 @@ export function classifyTestRun(
   durationMs: number,
   stdout: string,
   stderr: string,
+  command: string = DEFAULT_TOOLCHAIN.testCmd,
 ): TestRunResult {
   const passed = exitCode === 0;
   return {
@@ -62,7 +65,7 @@ export function classifyTestRun(
     passed,
     exitCode,
     durationMs,
-    command: TEST_COMMAND,
+    command,
     failureStage: passed ? undefined : 'test',
     outputTail: tail(stdout, stderr),
   };
@@ -84,6 +87,7 @@ export async function openCodeSandbox(
 ): Promise<CodeSandbox> {
   const { sandboxProvider } = deps;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
+  const toolchain = deps.toolchain ?? DEFAULT_TOOLCHAIN;
   const { token, owner, repo, ref } = input;
 
   const cloneUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
@@ -97,9 +101,9 @@ export async function openCodeSandbox(
     if (clone.exitCode !== 0) {
       throw new Error(`clone failed: ${redact(clone.stderr || clone.stdout, token)}`);
     }
-    const install = await handle.runCommand('npm ci', { cwd: CLONE_DIR, timeoutMs });
+    const install = await handle.runCommand(toolchain.installCmd, { cwd: CLONE_DIR, timeoutMs });
     if (install.exitCode !== 0) {
-      throw new Error(`npm ci failed: ${tail(install.stdout, install.stderr)}`);
+      throw new Error(`${toolchain.installCmd} failed: ${tail(install.stdout, install.stderr)}`);
     }
   } catch (err) {
     await handle.kill().catch(() => {});
@@ -119,8 +123,8 @@ export async function openCodeSandbox(
 
     async runTests() {
       const start = Date.now();
-      const res = await handle.runCommand(TEST_COMMAND, { cwd: CLONE_DIR, timeoutMs });
-      return classifyTestRun(res.exitCode, Date.now() - start, res.stdout, res.stderr);
+      const res = await handle.runCommand(toolchain.testCmd, { cwd: CLONE_DIR, timeoutMs });
+      return classifyTestRun(res.exitCode, Date.now() - start, res.stdout, res.stderr, toolchain.testCmd);
     },
 
     async readFiles(paths) {

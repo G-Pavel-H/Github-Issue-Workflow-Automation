@@ -16,6 +16,9 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 9 — Reviewer & Integrator → Pull Request  ← MVP heartbeat ✅
 - [x] Phase 10 — PR comment → fix loop (bounded)
 - [x] Phase 11 — Reliability, security, easy install  ← MVP done ✅
+- [ ] Phase 12 — Bring-your-own-key  (skipped for now — deferred)
+- [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
+- [ ] Phase 13b — first non-TS language pack (Python)
 
 ## Outstanding issues (revisit before calling go-live done)
 
@@ -266,6 +269,33 @@ Keep this current. It's the source of truth for what's done and what's next.
     one host-side clone + local re-embed (~$0) + a larger **Haiku** (cheapest-tier) prompt, i.e. a
     fraction of a cent. **Verify against real `llm_calls` / clarification-round counts on the next live
     run** before treating the cost/round claims as settled.
+- 2026-07-20 (Phase 13a): **`Toolchain` abstraction landed — behaviour-neutral refactor, the spine
+  for multi-language support.** Phase 13 (multi-language) is split into **13a** (this: introduce the
+  abstraction + route TS/JS through it, zero behaviour change) and **13b** (add the first non-TS pack,
+  **Python**). Founder decisions (2026-07-20): Python first; two PRs. Changes:
+  - **`src/toolchain/toolchain.ts`** — a `Toolchain` interface (`installCmd`, `testCmd`,
+    `testConfigFiles`, `projectManifest`, `sourceExts`, optional `sandboxTemplate`, `detect(files)`)
+    + the single `TYPESCRIPT_JAVASCRIPT` pack encoding today's exact hardcoded values, a `TOOLCHAINS`
+    registry, and two resolvers: `toolchainForLanguage(language)` (blank/unknown → default pack, i.e.
+    "can't tell → proceed"; known-unsupported → `undefined` → refuse) and `detectToolchain(files)`
+    (content-based, manifest presence — more reliable than GitHub's byte-count primary language).
+  - **Threaded through the execution seam** (the thing that must vary by language): both sandbox
+    sites — `code-sandbox.ts` (`openCodeSandbox` deps gain `toolchain?`, defaulting to TS/JS; install
+    + test commands + `classifyTestRun`'s `command` label now come from the pack) and `run-tests.ts`
+    (same) — plus `readTestConventions(sandbox, toolchain?)` (config-file list + manifest fallback from
+    the pack). The `TEST_COMMAND`/`SUPPORTED_LANGUAGES` constants are gone.
+  - **Gate is now a capability check**: `handleProduceSpec` refuses when `toolchainForLanguage(language)`
+    resolves to no pack, instead of a fixed `{typescript, javascript}` set. Behaviour-neutral — the
+    existing "refuses Python without any LLM calls" test still passes.
+  - **TDD**: new `test/toolchain/toolchain.test.ts` (8 cases pinning the TS/JS pack values, resolvers,
+    detection) written red-first; a new `code-sandbox` case drives a stand-in Python pack through the
+    sandbox and asserts `pytest`/`pip` run and `npm` does not (proves the seam without a real 2nd pack).
+    Full suite **220 pass / 23 skipped**, typecheck + lint clean. No behaviour changed.
+  - **Held for 13b** (kept out to stay behaviour-neutral): per-run toolchain *selection* wiring
+    (handler → `openSandbox`/`TddContext` — meaningless with one pack), repo-map manifest
+    generalization (still reads `package.json` directly), prompt parameterization, and widening the
+    CocoIndex sidecar `SOURCE_EXT`. The pack already carries `projectManifest`/`sourceExts`/
+    `sandboxTemplate` as the seams those will read.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)
@@ -330,6 +360,7 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-07-20 | Phase 13a | ✅ Complete | 220 tests pass (23 gated-skipped), typecheck + lint clean. Introduced the `Toolchain` abstraction (`src/toolchain/toolchain.ts`) + `typescript-javascript` pack + `toolchainForLanguage`/`detectToolchain` resolvers, routed both sandbox sites + the test-conventions probe through it, and turned the language gate into a capability check — **zero behaviour change** (the existing suite is the neutrality guard). Split Phase 13 into 13a (this) + 13b (Python pack). Demo: `npx vitest run test/toolchain` — the pack encodes the old `npm ci`/`npm test`/vitest-config/`.ts` values; a stand-in Python pack drives `pytest`/`pip` through the sandbox with no `npm`. Next: 13b — the Python language pack.
 - 2026-06-26 | Phase 0 | ✅ Complete | 14 tests pass, lint + typecheck green, `/health` returns 200, Probot webhooks wired + tested, migration harness ready, CI workflow added.
 - 2026-06-26 | Phase 1 | ✅ Complete | 29 tests pass (incl. 4 real PgStore integration tests verified against a local Postgres 16), lint + typecheck green. Built `jobs`/`runs`/`processed_events` schema (migration 002), `Store` interface + Pg/in-memory impls, polling worker, `issues.opened` → enqueue → worker posts "Tsukinome has picked this up" → run advances `received`→`acknowledged`. Idempotency: duplicate deliveries deduped; reprocessing a completed job posts no second comment. CI gained a Postgres service + `migrate up`. Demo: open an issue on the test repo → App comments.
 - 2026-06-28 | Phase 11 | ✅ Complete (MVP done) | 189 tests pass (23 gated-skipped), lint + typecheck green. Built job retries (lease-aware `claimNextJob` + `failOrRetryJob` with exponential backoff → dead-letter + graceful comment; `src/worker/retry.ts`), the stale-run sweeper (`src/worker/stale.ts`, ping 3d → close 7d as `Aborted`, hourly in `startWorker`), cost observability (`renderCostSummary` in PR body + issue comment; `getCostMetrics` + `debug:cost-metrics`), the `RUN_BUDGET_USD` config knob (applied at run creation), a security pass (`docs/security.md` + `test/security/boundary.test.ts`), migration 008 (`jobs.available_at` + claim/lease indexes, `runs.stale_pinged_at`) with both stores implementing the expanded `Store` contract, and rewrote the README + added `docs/setup.md`. Exit criteria: fresh install needs no per-repo config (setup guide, artifacts on the working branch) (1); duplicate deliveries/worker restarts don't double-act (run-state guards + dedupe + lease reclaim, regression-tested) (2); each run emits a cost summary + measured avg cost/issue recorded (3); failures (budget, crash, abandonment) leave a clear comment + clean state, never a silent hang (4). Migration 008 + all 13 PgStore tests verified against a real pgvector Postgres (206 pass with `DATABASE_URL` set). Demo: open an issue → clarify → `/approve` → PR with a cost summary in its body + a cost comment on the issue; kill the worker mid-job → it's reclaimed and completes; `debug:cost-metrics` prints the measured avg.
