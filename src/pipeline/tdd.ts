@@ -7,25 +7,22 @@ import { DEFAULT_TOOLCHAIN, type Toolchain } from '../toolchain/toolchain.js';
 import { renderRepoMap } from './repo-map.js';
 import type { FileEdit, FileSet, TaskList } from './schemas.js';
 
-/** A file looks like a test if it lives in a test dir or carries a .test/.spec suffix. */
-function isTestFile(path: string): boolean {
-  return /(^|\/)(test|tests|__tests__)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
-}
-
 /**
  * Gather cheap repo context for the authoring agents from the (already-cloned) sandbox: a structural
  * file map + a couple of real example test files. The examples are the load-bearing fix for wrong
  * import paths — the author copies the exact import style/depth from a real test instead of guessing.
+ * Test-file recognition + the project manifest come from the toolchain, so this works per language.
  */
 async function gatherRepoContext(
   sandbox: CodeSandbox,
+  toolchain: Toolchain,
   maxExamples = 2,
 ): Promise<{ repoMap: string; exampleTests: { path: string; content: string }[] }> {
   const files = await sandbox.listFiles().catch(() => [] as string[]);
-  const [pkg] = await sandbox.readFiles(['package.json']).catch(() => []);
-  const repoMap = files.length ? renderRepoMap(files, pkg?.content) : '';
+  const [manifest] = await sandbox.readFiles([toolchain.projectManifest]).catch(() => []);
+  const repoMap = files.length ? renderRepoMap(files, manifest?.content) : '';
   const exampleTests = files.length
-    ? await sandbox.readFiles(files.filter(isTestFile).slice(0, maxExamples))
+    ? await sandbox.readFiles(files.filter((f) => toolchain.isTestFile(f)).slice(0, maxExamples))
     : [];
   return { repoMap, exampleTests };
 }
@@ -55,6 +52,8 @@ export interface TddContext {
   planMarkdown: string;
   /** Paths the plan touches — read from the sandbox to give agents real file context. */
   affectedPaths: string[];
+  /** The run's language pack — drives example-test discovery and the injected language conventions. */
+  toolchain: Toolchain;
   /**
    * The target repo's test-runner configuration (e.g. `vitest.config.ts` contents), so the
    * test-author places new test files where the runner will actually collect them. A test the
@@ -128,11 +127,15 @@ function renderFiles(files: { path: string; content: string }[]): string {
  * got re-billed (uncached) on every ladder attempt of every task.
  */
 function renderExampleImports(files: { path: string; content: string }[]): string {
+  // Matches JS/TS (`import …`, `export … from …`, `require(`) and Python (`import …`,
+  // `from … import …`) import lines. Extend this if a new language pack uses other syntax.
+  const importLine =
+    /^\s*(import\b|from\b[^\n]*\bimport\b|export\b[^\n]*\bfrom\b|(?:const|let|var)\b[^\n]*\brequire\()/;
   return files
     .map((f) => {
       const imports = f.content
         .split('\n')
-        .filter((l) => /^\s*(import\b|export\b[^\n]*\bfrom\b|(?:const|let|var)\b[^\n]*\brequire\()/.test(l))
+        .filter((l) => importLine.test(l))
         .join('\n');
       return `--- ${f.path} ---\n${imports || '(no imports)'}`;
     })
@@ -172,29 +175,30 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
 
   // Repo structure + real example tests, so the authoring agents see what exists and copy the
   // repo's exact import style/depth instead of guessing (the #1 cause of unresolvable-import stalls).
-  const { repoMap, exampleTests } = await gatherRepoContext(sandbox);
+  const { repoMap, exampleTests } = await gatherRepoContext(sandbox, ctx.toolchain);
   const repoMapBlock = repoMap ? `\n\n${repoMap}` : '';
 
   // --- Test Author: write tests that FAIL now (red). A test that passes pre-impl is rejected. ---
   const conventionsBlock = ctx.testConventions
     ? `\n\n## Repo test-runner config (place new test files where this will collect them):\n` +
       `${ctx.testConventions}\n` +
-      `If it only collects a top-level test/ tree, put your file there (mirroring the source path), ` +
-      `NOT co-located under src/ — a test the runner never collects can never go red.`
+      `Put your file where this config makes the runner collect it (mirroring the source path and the ` +
+      `example tests above) — a test the runner never collects can never go red.`
     : '';
   const exampleTestsBlock = exampleTests.length
     ? `\n\n## Example test imports from this repo (copy their import style + relative-path depth exactly):\n` +
       `${renderExampleImports(exampleTests)}`
     : '';
-  // The load-bearing rule: an unresolvable import is a FALSE red the implementer can never fix.
+  // Language conventions (from the toolchain) + the load-bearing, language-agnostic rule: an
+  // unresolvable import is a FALSE red the implementer can never fix, because it may not edit tests.
   const importRule =
-    `\n\n## Imports MUST resolve\n` +
-    `Compute each relative import from YOUR test file's own location to the target module. E.g. a ` +
-    `test at \`test/foo.test.ts\` imports \`src/foo\` as \`../src/foo\`; a test at ` +
-    `\`test/sub/foo.test.ts\` imports it as \`../../src/foo\`. Match the example files above. A test ` +
-    `that fails only because an import can't be resolved is a FALSE red: it looks like TDD red, but ` +
-    `the implementer cannot fix it (it may not edit tests). Import the not-yet-existing module at the ` +
-    `path the plan specifies, resolved correctly from where you place the test.`
+    `\n\n## ${ctx.toolchain.displayName} test conventions\n` +
+    `${ctx.toolchain.promptConventions}\n\n` +
+    `## Imports MUST resolve\n` +
+    `Import the module under test the way the example test files above do, resolved correctly from ` +
+    `where you place your test file. A test that fails only because an import can't be resolved is a ` +
+    `FALSE red: it looks like TDD red, but the implementer cannot fix it (it may not edit tests). ` +
+    `Import the not-yet-existing module at the path the plan specifies.`
   // Run-stable prefix — identical across every task and every ladder attempt, so mark it for prompt
   // caching (a cache breakpoint after the system prefix). Only the variable tail below is re-billed.
   const authorStablePrefix = `${specPlan}${repoMapBlock}${conventionsBlock}${exampleTestsBlock}${importRule}`;

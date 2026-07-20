@@ -18,7 +18,7 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 11 — Reliability, security, easy install  ← MVP done ✅
 - [ ] Phase 12 — Bring-your-own-key  (skipped for now — deferred)
 - [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
-- [ ] Phase 13b — first non-TS language pack (Python)
+- [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
 
 ## Outstanding issues (revisit before calling go-live done)
 
@@ -269,6 +269,39 @@ Keep this current. It's the source of truth for what's done and what's next.
     one host-side clone + local re-embed (~$0) + a larger **Haiku** (cheapest-tier) prompt, i.e. a
     fraction of a cent. **Verify against real `llm_calls` / clarification-round counts on the next live
     run** before treating the cost/round claims as settled.
+- 2026-07-20 (Phase 13b): **First non-TS language pack — Python. Tsukinome now turns a Python issue
+  into a test-first PR (pytest), not only TypeScript.** Built on 13a's `Toolchain` seam; TS/JS path
+  unchanged. Founder decisions carried from 13a: Python first, two PRs.
+  - **`PYTHON` pack** (`src/toolchain/toolchain.ts`): `pytest` test command; best-effort pip install
+    (`pip install -e .` → `-r requirements.txt` → ensure pytest); `.py` sources; pytest test-file
+    detection (`test_*.py` / `*_test.py` / `tests/` / `conftest.py`) and import conventions. Added
+    `promptConventions` + `isTestFile` to the `Toolchain` interface (TS/JS pack's `isTestFile` now
+    guards the shared `tests/` dir by extension so packs don't claim each other's files) and a
+    `toolchainById` lookup.
+  - **Per-run selection wiring:** the pack is resolved from the GitHub language at the intake gate and
+    **persisted as `context.toolchainId`**; `readRunContext` re-resolves it (fallback = default pack
+    for pre-13b runs). `handleImplement`, `handleFix`, the Architect (`produce_plan` + revision) and
+    the Clarifier all thread the pack into `openSandbox` (install/test cmds), `readTestConventions`,
+    the TDD context (example-test discovery via `toolchain.isTestFile` + injected `promptConventions`),
+    and `buildRepoMap`/`retrieveCodeContext` (`toolchain.projectManifest`, so the map summarizes
+    `pyproject.toml` for Python). No `index.ts`/worker wiring change (deps already carried).
+  - **Code index widened to Python:** sidecar `SOURCE_EXT` + the fake index regex + repo-map excluded
+    dirs now include `.py` (+ Python cache dirs). The example-import extractor recognises Python
+    `from … import`. `renderRepoMap`'s manifest handling generalized (JSON summarized, else prefix).
+  - **Prompts:** `agents/test-author.md` made language-neutral — the concrete test-file naming/import
+    idioms now come from the injected `promptConventions`, so the same role works across packs. The
+    other roles carried no TS-specific idioms.
+  - **Gate is a real behaviour change now:** Python is accepted (was refused). The produce-spec
+    "refuses unsupported" test moved to **Ruby**; a new test asserts a Python repo is accepted and
+    persists `toolchainId: 'python'`.
+  - **TDD**: toolchain tests extended (Python pack, resolvers, `toolchainById`, cross-language
+    `isTestFile`) + a new `runTaskTdd` case proving a Python pack discovers Python example tests and
+    injects pytest conventions (and does *not* inject TS conventions). Full suite **228 pass / 23
+    skipped**, typecheck + lint clean.
+  - **Remaining to verify (gated, like E2B/Anthropic):** a real end-to-end Python issue→PR needs a
+    sandbox image carrying Python 3 + pip (one multi-toolchain E2B template — see `docs/setup.md`);
+    the per-pack `sandboxTemplate` override exists but is unused (single-image approach). The pip
+    install command is best-effort across project shapes — refine against a real Python run.
 - 2026-07-20 (Phase 13a): **`Toolchain` abstraction landed — behaviour-neutral refactor, the spine
   for multi-language support.** Phase 13 (multi-language) is split into **13a** (this: introduce the
   abstraction + route TS/JS through it, zero behaviour change) and **13b** (add the first non-TS pack,
@@ -360,6 +393,7 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-07-20 | Phase 13b | ✅ Complete (code + CI; live Python run pending a Python sandbox image) | 228 tests pass (23 gated-skipped), typecheck + lint clean. Added the `PYTHON` language pack (pytest/pip, `.py`, pytest conventions) + `promptConventions`/`isTestFile`/`toolchainById` on the toolchain; resolve the pack at intake and persist `context.toolchainId`; thread it through implement/fix/architect/clarifier (sandbox commands, test-conventions probe, example-test discovery + injected conventions, repo-map manifest); widened the code index (sidecar + fake + repo-map dirs) and the example-import extractor to Python; made `agents/test-author.md` language-neutral. Gate now accepts Python (refusal test → Ruby; new test asserts Python persists `toolchainId: 'python'`). Demo: `npx vitest run test/toolchain test/pipeline/tdd.test.ts` — the Python pack drives `pytest`/`pip` and a Python-pack TDD run finds `tests/test_*.py` examples + injects pytest conventions; the TS/JS path is unchanged. Next: build a Python-capable E2B image and verify a real Python issue→PR end to end.
 - 2026-07-20 | Phase 13a | ✅ Complete | 220 tests pass (23 gated-skipped), typecheck + lint clean. Introduced the `Toolchain` abstraction (`src/toolchain/toolchain.ts`) + `typescript-javascript` pack + `toolchainForLanguage`/`detectToolchain` resolvers, routed both sandbox sites + the test-conventions probe through it, and turned the language gate into a capability check — **zero behaviour change** (the existing suite is the neutrality guard). Split Phase 13 into 13a (this) + 13b (Python pack). Demo: `npx vitest run test/toolchain` — the pack encodes the old `npm ci`/`npm test`/vitest-config/`.ts` values; a stand-in Python pack drives `pytest`/`pip` through the sandbox with no `npm`. Next: 13b — the Python language pack.
 - 2026-06-26 | Phase 0 | ✅ Complete | 14 tests pass, lint + typecheck green, `/health` returns 200, Probot webhooks wired + tested, migration harness ready, CI workflow added.
 - 2026-06-26 | Phase 1 | ✅ Complete | 29 tests pass (incl. 4 real PgStore integration tests verified against a local Postgres 16), lint + typecheck green. Built `jobs`/`runs`/`processed_events` schema (migration 002), `Store` interface + Pg/in-memory impls, polling worker, `issues.opened` → enqueue → worker posts "Tsukinome has picked this up" → run advances `received`→`acknowledged`. Idempotency: duplicate deliveries deduped; reprocessing a completed job posts no second comment. CI gained a Postgres service + `migrate up`. Demo: open an issue on the test repo → App comments.

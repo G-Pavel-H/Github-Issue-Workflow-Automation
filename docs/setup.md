@@ -77,6 +77,14 @@ e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile
 Then set `E2B_TEMPLATE=tsukinome-node22` (or the printed template id). Leaving it unset falls back to
 the base image and is only safe for target repos that run on old Node.
 
+**Multi-language repos (Python).** As of Phase 13b, Tsukinome also accepts **Python** repos and runs
+their suite with `pytest` (installing deps best-effort via `pip`). For a Python target the sandbox
+image must carry a **Python 3 runtime + pip** as well as Node — so build the template from a base that
+has both (extend `e2b.Dockerfile` to install Python, or point `E2B_TEMPLATE` at a multi-toolchain
+image). One image carrying every supported toolchain is the intended setup; the per-language template
+override (`Toolchain.sandboxTemplate`) is reserved for later if a single image gets unwieldy. Which
+pack a run uses is chosen from the repo's GitHub language at intake and pinned on the run.
+
 ### Code index (optional CocoIndex sidecar)
 
 The Architect can plan against real repo code when the CocoIndex sidecar is available. It runs
@@ -138,5 +146,5 @@ is ever merged without your approval.
   cost/issue.
 - **Reliability:** jobs retry with exponential backoff and are dead-lettered (with a failure
   comment) after the attempt cap; a crashed worker's in-flight job is reclaimed by its lease.
-- **Supported repos:** TypeScript/JavaScript only for the MVP; other languages are refused
-  gracefully with a comment.
+- **Supported repos:** TypeScript/JavaScript and **Python** (Phase 13b); other languages are refused
+  gracefully with a comment. Support is a "language pack" per toolchain — see `src/toolchain/`.

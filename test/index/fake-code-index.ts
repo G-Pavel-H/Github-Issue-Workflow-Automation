@@ -14,8 +14,9 @@ interface StoredChunk extends CodeChunk {
   embedding: number[];
 }
 
-const SOURCE_EXT = /\.(ts|tsx|js|jsx|mts|cts)$/;
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage']);
+// Keep in sync with the sidecar's SOURCE_EXT and the toolchains' sourceExts (TS/JS + Python).
+const SOURCE_EXT = /\.(ts|tsx|js|jsx|mts|cts|py)$/;
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '__pycache__', '.venv', 'venv']);
 
 /**
  * In-memory `CodeIndex` for unit tests (no DB, no Python). Walks the checkout, splits

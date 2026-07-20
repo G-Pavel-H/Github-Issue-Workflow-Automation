@@ -13,10 +13,28 @@ import { join } from 'node:path';
 const DEFAULT_MAX_FILES = 400;
 
 /** Directories whose contents are noise for planning; never listed in the map. */
-const EXCLUDED_DIRS = ['node_modules/', 'dist/', 'build/', 'coverage/', '.git/', '.next/'];
+const EXCLUDED_DIRS = [
+  'node_modules/',
+  'dist/',
+  'build/',
+  'coverage/',
+  '.git/',
+  '.next/',
+  // Python build/cache noise.
+  '__pycache__/',
+  '.venv/',
+  'venv/',
+  '.pytest_cache/',
+  '.mypy_cache/',
+  '.tox/',
+];
 
-/** Trim package.json to the fields an agent cares about (name, scripts, dependency names). */
-function summarizePackageJson(raw: string): string {
+/**
+ * Trim the project manifest to the fields an agent cares about. For a JSON manifest (package.json)
+ * that's name/scripts/dependency names; a non-JSON manifest (e.g. pyproject.toml) is shown as a
+ * prefix rather than parsed — enough to see the project name, deps, and test config.
+ */
+function summarizeManifest(raw: string): string {
   try {
     const pkg = JSON.parse(raw) as Record<string, unknown>;
     const summary: Record<string, unknown> = {};
@@ -29,17 +47,17 @@ function summarizePackageJson(raw: string): string {
     }
     return JSON.stringify(summary, null, 2);
   } catch {
-    return raw.slice(0, 2000); // not valid JSON — show a prefix rather than nothing
+    return raw.slice(0, 2000); // not JSON (e.g. TOML/cfg) — show a prefix rather than nothing
   }
 }
 
 /**
- * Render a repo map from a list of tracked file paths (+ optional package.json contents). Pure and
- * side-effect free so it is unit-testable; acquisition (git vs sandbox) is the caller's job.
+ * Render a repo map from a list of tracked file paths (+ optional project-manifest contents). Pure
+ * and side-effect free so it is unit-testable; acquisition (git vs sandbox) is the caller's job.
  */
 export function renderRepoMap(
   files: string[],
-  packageJson?: string,
+  manifest?: string,
   opts: { maxFiles?: number } = {},
 ): string {
   const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
@@ -50,8 +68,8 @@ export function renderRepoMap(
   const omitted = filtered.length - shown.length;
 
   const sections = [`## Repository file map (${filtered.length} files)`];
-  if (packageJson) {
-    sections.push(`### package.json (summary)\n${summarizePackageJson(packageJson)}`);
+  if (manifest) {
+    sections.push(`### Project manifest (summary)\n${summarizeManifest(manifest)}`);
   }
   const fileList = shown.join('\n') + (omitted > 0 ? `\n… (${omitted} more files omitted)` : '');
   sections.push(`### Files\n${fileList}`);
@@ -75,16 +93,21 @@ export function listTrackedFiles(dir: string): Promise<string[]> {
 
 /**
  * Build the repo map for a local checkout directory. Best-effort: on any failure returns undefined
- * so the caller degrades gracefully (plans without the map) rather than failing the run.
+ * so the caller degrades gracefully (plans without the map) rather than failing the run. `manifest`
+ * names the project manifest to summarize (defaults to `package.json`; e.g. `pyproject.toml` for
+ * Python) so the map is language-appropriate.
  */
-export async function buildRepoMap(dir: string, opts?: { maxFiles?: number }): Promise<string | undefined> {
+export async function buildRepoMap(
+  dir: string,
+  opts?: { maxFiles?: number; manifest?: string },
+): Promise<string | undefined> {
   const files = await listTrackedFiles(dir);
   if (files.length === 0) return undefined;
-  let packageJson: string | undefined;
+  let manifest: string | undefined;
   try {
-    packageJson = await readFile(join(dir, 'package.json'), 'utf-8');
+    manifest = await readFile(join(dir, opts?.manifest ?? 'package.json'), 'utf-8');
   } catch {
-    packageJson = undefined;
+    manifest = undefined;
   }
-  return renderRepoMap(files, packageJson, opts);
+  return renderRepoMap(files, manifest, { maxFiles: opts?.maxFiles });
 }
