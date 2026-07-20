@@ -21,7 +21,7 @@ import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
 import { decompose, readTestConventions, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
-import { toolchainForLanguage } from '../toolchain/toolchain.js';
+import { DEFAULT_TOOLCHAIN, toolchainById, toolchainForLanguage, type Toolchain } from '../toolchain/toolchain.js';
 import {
   IMPL_HELP_CAP,
   renderEscalationComment,
@@ -208,7 +208,8 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
   // any tokens. A null/blank detected language resolves to the default pack (can't tell → proceed);
   // a known-but-unsupported language resolves to no pack and is refused gracefully.
   const language = await github.getRepoLanguage({ installationId, owner, repo });
-  if (!toolchainForLanguage(language)) {
+  const toolchain = toolchainForLanguage(language);
+  if (!toolchain) {
     await github.postIssueComment({
       installationId,
       owner,
@@ -284,6 +285,8 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
       ...run.context,
       spec: { title: intake.output!.title, classification: intake.output!.classification },
       specData: spec.output!,
+      // Persist the resolved language pack so implement/fix reload the same one without re-detecting.
+      toolchainId: toolchain.id,
     });
     await store.updateRunState(run.id, RunState.Specifying);
     await store.enqueueJob({
@@ -320,18 +323,21 @@ interface ClarificationContext {
   questions: string[];
 }
 
-/** Read the persisted spec meta, structured spec/plan, and clarification questions off the context. */
+/** Read the persisted spec meta, structured spec/plan, toolchain, and clarification questions. */
 function readRunContext(context: Record<string, unknown>): {
   spec: SpecMeta;
   specData?: Spec;
   planData?: Plan;
+  /** The run's resolved language pack; falls back to the default for runs from before 13b. */
+  toolchain: Toolchain;
   questions: string[];
 } {
   const spec = (context.spec as SpecMeta | undefined) ?? {};
   const specData = context.specData as Spec | undefined;
   const planData = context.planData as Plan | undefined;
+  const toolchain = toolchainById(context.toolchainId as string | undefined) ?? DEFAULT_TOOLCHAIN;
   const clarification = context.clarification as ClarificationContext | undefined;
-  return { spec, specData, planData, questions: clarification?.questions ?? [] };
+  return { spec, specData, planData, toolchain, questions: clarification?.questions ?? [] };
 }
 
 /** Persisted state of the implementation "stuck" gate (survives the suspend across a human reply). */
@@ -398,6 +404,7 @@ export async function handleClarify(job: Job, deps: PlanHandlerDeps): Promise<vo
       issueNumber,
       runId: run.id,
       query: specArtifact.content,
+      toolchain: readRunContext(run.context).toolchain,
     });
     codeContext =
       `\n\n${repoMap ?? '## Repository file map\n(unavailable)'}` +
@@ -612,6 +619,8 @@ async function retrieveCodeContext(
     issueNumber: number;
     runId: number;
     query: string;
+    /** The run's language pack, so the structural map summarizes the right project manifest. */
+    toolchain?: Toolchain;
   },
 ): Promise<{ repoMap?: string; chunks: CodeChunk[] }> {
   const { github, codeIndex, cloneRepo, log } = deps;
@@ -651,7 +660,7 @@ async function retrieveCodeContext(
     }
 
     // Structural view of the repo (cheap; complements the semantic retrieval above). Best-effort.
-    const repoMap = await buildRepoMap(checkout.dir);
+    const repoMap = await buildRepoMap(checkout.dir, { manifest: args.toolchain?.projectManifest });
     return { repoMap, chunks };
   } finally {
     await codeIndex.dropNamespace(namespace);
@@ -668,6 +677,7 @@ interface ArchitectArgs {
   spec: Spec;
   specMarkdown: string;
   title: string;
+  toolchain?: Toolchain;
   feedback?: string;
   previousPlanMarkdown?: string;
 }
@@ -692,6 +702,7 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
     issueNumber,
     runId,
     query,
+    toolchain: args.toolchain,
   });
 
   const sections = [
@@ -753,7 +764,7 @@ export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promis
     return;
   }
 
-  const { spec: meta, specData } = readRunContext(run.context);
+  const { spec: meta, specData, toolchain } = readRunContext(run.context);
   if (!specData) {
     log.warn({ runId: run.id, repo: repoLabel }, 'produce_plan with no specData; skipping');
     return;
@@ -795,6 +806,7 @@ export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promis
       spec: specData,
       specMarkdown: specArtifact?.content ?? '',
       title: meta.title ?? `Issue #${issueNumber}`,
+      toolchain,
     });
 
     await store.updateRunContext(run.id, { ...run.context, planData: plan });
@@ -859,7 +871,7 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
   }
 
   // Change request — regenerate the plan, bounded by the revision cap.
-  const { spec: meta, specData } = readRunContext(run.context);
+  const { spec: meta, specData, toolchain } = readRunContext(run.context);
   if (!specData) {
     log.warn({ runId: run.id, repo: repoLabel }, 'plan revision with no specData; skipping');
     return;
@@ -887,6 +899,7 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
       spec: specData,
       specMarkdown: specArtifact?.content ?? '',
       title: meta.title ?? `Issue #${issueNumber}`,
+      toolchain,
       feedback: commentBody,
       previousPlanMarkdown: planArtifact?.content,
     });
@@ -950,13 +963,13 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
     return;
   }
 
-  const { planData } = readRunContext(run.context);
+  const { planData, toolchain } = readRunContext(run.context);
   const affectedPaths = planData?.affectedFiles.map((f) => f.path) ?? [];
 
   const token = await github.getInstallationToken({ installationId, owner, repo });
   const sandbox = await openSandbox(
     { token, owner, repo, ref: specBranch(issueNumber) },
-    { sandboxProvider, log },
+    { sandboxProvider, log, toolchain },
   );
 
   try {
@@ -988,7 +1001,8 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
       specMarkdown: specArtifact.content,
       planMarkdown: planArtifact.content,
       affectedPaths,
-      testConventions: await readTestConventions(sandbox),
+      toolchain,
+      testConventions: await readTestConventions(sandbox, toolchain),
     };
 
     for (const task of tasks) {
@@ -1279,6 +1293,8 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
     return;
   }
 
+  const { toolchain } = readRunContext(run.context);
+
   // Reply on the inline thread when we have one, else on the PR conversation.
   const reply = async (body: string): Promise<void> => {
     if (reviewCommentId !== undefined) {
@@ -1341,7 +1357,7 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
     const token = await github.getInstallationToken({ installationId, owner, repo });
     const sandbox = await openSandbox(
       { token, owner, repo, ref: specBranch(issueNumber) },
-      { sandboxProvider, log },
+      { sandboxProvider, log, toolchain },
     );
     try {
       const task: TaskSpec = {
@@ -1358,7 +1374,8 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
         specMarkdown: specArtifact?.content ?? '',
         planMarkdown: planArtifact?.content ?? '',
         affectedPaths: filePath ? [filePath] : [],
-        testConventions: await readTestConventions(sandbox),
+        toolchain,
+        testConventions: await readTestConventions(sandbox, toolchain),
       });
 
       if (outcome.status === 'escalated') {

@@ -29,13 +29,21 @@ export interface Toolchain {
   sourceExts: string[];
   /** Optional sandbox template override; unset → the process-level `E2B_TEMPLATE` / base image. */
   sandboxTemplate?: string;
-  /** True when a repo with these tracked files is this toolchain's project (manifest present). */
+  /**
+   * Language-specific guidance injected into the authoring agents' prompts (test-file naming, the
+   * test framework, and how imports resolve). Keeps the role instruction files language-neutral so
+   * the same agents work across packs — the concrete idioms live here, per language.
+   */
+  promptConventions: string;
+  /** True when a repo with these tracked files is this toolchain's project (a project file present). */
   detect(files: string[]): boolean;
+  /** True when `path` is one of this language's test files (so example tests are found correctly). */
+  isTestFile(path: string): boolean;
 }
 
-/** Does `files` contain `manifest` at the repo root or in any subdirectory? */
-function hasManifest(files: string[], manifest: string): boolean {
-  return files.some((f) => f === manifest || f.endsWith(`/${manifest}`));
+/** Does `files` contain `name` at the repo root or in any subdirectory? */
+function hasFile(files: string[], name: string): boolean {
+  return files.some((f) => f === name || f.endsWith(`/${name}`));
 }
 
 /**
@@ -64,13 +72,67 @@ export const TYPESCRIPT_JAVASCRIPT: Toolchain = {
   ],
   projectManifest: 'package.json',
   sourceExts: ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts'],
+  promptConventions:
+    '- Test files: `*.test.ts` / `*.spec.ts` (or `.js`/`.tsx`), collected per the runner config — ' +
+    'usually a top-level `test/` tree mirroring the source path, or co-located under `src/`.\n' +
+    '- Framework: vitest or jest (see the runner config).\n' +
+    '- Imports: relative ESM imports, computed from the test file\'s own location. A test at ' +
+    '`test/foo.test.ts` imports `src/foo` as `../src/foo`; at `test/sub/foo.test.ts` as `../../src/foo`.',
   detect(files) {
-    return hasManifest(files, this.projectManifest);
+    return hasFile(files, this.projectManifest);
+  },
+  isTestFile(path) {
+    // A JS/TS file in a test dir, or any file with a .test/.spec suffix. The extension guard on the
+    // dir branch keeps a shared `tests/` dir from claiming another language's files.
+    const inTestDir = /(^|\/)(test|tests|__tests__)\//.test(path) && /\.[cm]?[jt]sx?$/.test(path);
+    return inTestDir || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
+  },
+};
+
+/**
+ * Python pack: pytest over pip. The install command is best-effort across the common project shapes
+ * (editable install if there's a build config, else `requirements.txt`) and always ensures pytest is
+ * present, since `testCmd` is `pytest`. The sandbox image must carry a Python runtime (see docs/setup).
+ */
+export const PYTHON: Toolchain = {
+  id: 'python',
+  displayName: 'Python',
+  languages: ['python'],
+  installCmd:
+    'python -m pip install --quiet --upgrade pip && ' +
+    '(pip install --quiet -e . || pip install --quiet -r requirements.txt || true) && ' +
+    'pip install --quiet pytest',
+  testCmd: 'pytest',
+  testConfigFiles: ['pyproject.toml', 'pytest.ini', 'tox.ini', 'setup.cfg', 'conftest.py'],
+  projectManifest: 'pyproject.toml',
+  sourceExts: ['.py'],
+  promptConventions:
+    '- Test files: `test_*.py` or `*_test.py`, collected by pytest — usually under a `tests/` ' +
+    'directory or alongside the module under test.\n' +
+    '- Framework: pytest with plain `assert` statements (no test classes required).\n' +
+    '- Imports: import the module under test by its package/module path exactly as the repo\'s ' +
+    'existing tests do (e.g. `from mypkg.foo import bar`, or `import foo` for a flat layout). Match ' +
+    'the example test files\' import style — do not invent a package path that does not exist.',
+  detect(files) {
+    return (
+      hasFile(files, 'pyproject.toml') ||
+      hasFile(files, 'setup.py') ||
+      hasFile(files, 'setup.cfg') ||
+      hasFile(files, 'requirements.txt')
+    );
+  },
+  isTestFile(path) {
+    return (
+      (/(^|\/)tests?\//.test(path) && path.endsWith('.py')) ||
+      /(^|\/)test_[^/]*\.py$/.test(path) ||
+      /_test\.py$/.test(path) ||
+      /(^|\/)conftest\.py$/.test(path)
+    );
   },
 };
 
 /** Every registered language pack. Add a pack here to make it selectable. */
-export const TOOLCHAINS: readonly Toolchain[] = [TYPESCRIPT_JAVASCRIPT];
+export const TOOLCHAINS: readonly Toolchain[] = [TYPESCRIPT_JAVASCRIPT, PYTHON];
 
 /** Used when a repo's language can't be determined — preserves the old "null language → proceed". */
 export const DEFAULT_TOOLCHAIN: Toolchain = TYPESCRIPT_JAVASCRIPT;
@@ -93,4 +155,10 @@ export function toolchainForLanguage(language: string | null | undefined): Toolc
  */
 export function detectToolchain(files: string[]): Toolchain | undefined {
   return TOOLCHAINS.find((t) => t.detect(files));
+}
+
+/** Resolve a pack from its stored `id` (persisted on the run so later phases reload the same pack). */
+export function toolchainById(id: string | null | undefined): Toolchain | undefined {
+  if (!id) return undefined;
+  return TOOLCHAINS.find((t) => t.id === id);
 }

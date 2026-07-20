@@ -44,10 +44,14 @@ EMBEDDING_DIM = 384
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 120
 
-# Source file extensions we index. Keep in sync with the fake index's SOURCE_EXT (TS/JS, MVP).
-SOURCE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts")
+# Source file extensions we index. Keep in sync with the fake index's SOURCE_EXT and the
+# toolchains' sourceExts (src/toolchain/toolchain.ts): TS/JS + Python.
+SOURCE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".py")
 # Directories we never descend into.
-EXCLUDED_DIRS = {"node_modules", "dist", ".git", "coverage", "build", ".next"}
+EXCLUDED_DIRS = {
+    "node_modules", "dist", ".git", "coverage", "build", ".next",
+    "__pycache__", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".tox",
+}
 
 _MODEL = DEFAULT_MODEL
 _ST_MODEL = None  # lazily-loaded SentenceTransformer, cached for the process lifetime

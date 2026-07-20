@@ -73,6 +73,8 @@ describe('handleProduceSpec', () => {
     const artifact = await store.getArtifact(run!.id, 'spec');
     expect(artifact!.path).toBe('.tsukinome/42/spec.md');
     expect((await store.getLlmCalls(run!.id)).length).toBe(2);
+    // The resolved language pack is persisted for implement/fix to reload.
+    expect(run!.context.toolchainId).toBe('typescript-javascript');
 
     // A `clarify` job is chained to run the clarification gate.
     const clarifyJob = await store.claimNextJob();
@@ -105,7 +107,8 @@ describe('handleProduceSpec', () => {
 
   it('refuses unsupported languages gracefully without any LLM calls', async () => {
     const provider = specProvider();
-    const github = fakeGitHub({ language: 'Python' });
+    // Ruby has no language pack — Python/TS/JS are supported (Phase 13a/13b).
+    const github = fakeGitHub({ language: 'Ruby' });
 
     await handleProduceSpec(job, {
       store,
@@ -119,6 +122,21 @@ describe('handleProduceSpec', () => {
     expect(github.postIssueComment).toHaveBeenCalledTimes(1);
     const run = await store.getRun(job.payload);
     expect(run!.state).toBe(RunState.Unsupported);
+  });
+
+  it('accepts a Python repo and persists the python toolchain', async () => {
+    const github = fakeGitHub({ language: 'Python' });
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    const run = await store.getRun(job.payload);
+    expect(run!.state).toBe(RunState.Specifying);
+    expect(run!.context.toolchainId).toBe('python');
+    expect(github.commitFile).toHaveBeenCalledTimes(1);
   });
 
   it('stops gracefully when the run budget is exhausted mid-pipeline', async () => {

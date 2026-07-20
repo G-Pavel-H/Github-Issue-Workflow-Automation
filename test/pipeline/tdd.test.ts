@@ -7,6 +7,7 @@ import { FakeLlmProvider, textResponse } from '../llm/fake-provider.js';
 import { FakeCodeSandbox } from '../sandbox/fake-code-sandbox.js';
 import { silentLog } from '../helpers.js';
 import type { TestRunStatus } from '../../src/sandbox/types.js';
+import { PYTHON, TYPESCRIPT_JAVASCRIPT } from '../../src/toolchain/toolchain.js';
 
 const key: RunKey = { installationId: 1, owner: 'acme', repo: 'widgets', issueNumber: 1 };
 
@@ -33,6 +34,7 @@ async function ctx(
     specMarkdown: '# spec',
     planMarkdown: '# plan',
     affectedPaths: ['src/add.ts', 'src/add.test.ts'],
+    toolchain: TYPESCRIPT_JAVASCRIPT,
   };
 }
 
@@ -154,6 +156,29 @@ describe('runTaskTdd', () => {
     expect(authorReq).toContain('test/existing.test.ts'); // example test included
     expect(authorReq).toContain("import { x } from '../src/x'"); // its import style shown
     expect(authorReq).toContain('FALSE red'); // the import-resolution rule
+  });
+
+  it('is language-driven: a Python pack finds Python example tests and injects Python conventions', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('tests/test_add.py', 'def test_add(): ...')), // author → red
+      textResponse(files('src/add.py', 'def add(a, b): return a + b')), // implementer → green
+      textResponse(files('src/add.py', 'def add(a, b): return a + b')), // refactor
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed']);
+    // A real Python example test (picked) + a TS file (NOT a Python test) + the manifest.
+    sandbox.files.set('tests/test_existing.py', 'from src.x import x\n# example');
+    sandbox.files.set('src/legacy.ts', '// TSCONTENTMARKER');
+    sandbox.files.set('pyproject.toml', '[project]\nname = "demo"');
+
+    const base = await ctx(store, provider, sandbox);
+    await runTaskTdd(task, { ...base, toolchain: PYTHON, affectedPaths: ['src/add.py'] });
+
+    const authorReq = JSON.stringify(provider.requests[0]);
+    expect(authorReq).toContain('tests/test_existing.py'); // Python example test discovered
+    expect(authorReq).toContain('from src.x import x'); // its import style shown
+    expect(authorReq).toContain('pytest'); // Python conventions injected
+    expect(authorReq).not.toContain('vitest or jest'); // NOT the TS/JS conventions
+    expect(authorReq).not.toContain('TSCONTENTMARKER'); // the .ts file isn't treated as a test example
   });
 
   it('sends the run-stable context as a cached block and the per-task tail uncached', async () => {
