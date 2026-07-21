@@ -9,6 +9,7 @@ describe('loadConfig', () => {
     ANTHROPIC_API_KEY: 'sk-ant-fake-key',
     DATABASE_URL: 'postgres://localhost:5432/tsukinome',
     E2B_API_KEY: 'e2b-fake-key',
+    MASTER_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64'),
   };
 
   let originalEnv: NodeJS.ProcessEnv;
@@ -21,6 +22,7 @@ describe('loadConfig', () => {
     }
     delete process.env.PORT;
     delete process.env.RUN_BUDGET_USD;
+    delete process.env.ALLOW_PLATFORM_KEY_FALLBACK;
   });
 
   afterEach(() => {
@@ -50,8 +52,9 @@ describe('loadConfig', () => {
     expect(config.appId).toBe('12345');
     expect(config.privateKey).toBe('fake-private-key');
     expect(config.webhookSecret).toBe('fake-webhook-secret');
-    expect(config.anthropicApiKey).toBe('sk-ant-fake-key');
+    expect(config.platformAnthropicKey).toBe('sk-ant-fake-key');
     expect(config.databaseUrl).toBe('postgres://localhost:5432/tsukinome');
+    expect(config.masterEncryptionKey).toHaveLength(32);
     expect(config.port).toBe(3000); // default
   });
 
@@ -79,10 +82,38 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow('WEBHOOK_SECRET');
   });
 
-  it('throws when ANTHROPIC_API_KEY is missing', () => {
+  it('treats ANTHROPIC_API_KEY as optional (pure BYO deploys need no operator key)', () => {
     const { ANTHROPIC_API_KEY: _, ...rest } = validEnv;
     Object.assign(process.env, rest);
-    expect(() => loadConfig()).toThrow('ANTHROPIC_API_KEY');
+    const config = loadConfig();
+    expect(config.platformAnthropicKey).toBeUndefined();
+    expect(config.allowPlatformKeyFallback).toBe(false);
+  });
+
+  it('throws when MASTER_ENCRYPTION_KEY is missing', () => {
+    const { MASTER_ENCRYPTION_KEY: _, ...rest } = validEnv;
+    Object.assign(process.env, rest);
+    expect(() => loadConfig()).toThrow('MASTER_ENCRYPTION_KEY');
+  });
+
+  it('throws when MASTER_ENCRYPTION_KEY does not decode to 32 bytes', () => {
+    Object.assign(process.env, validEnv, {
+      MASTER_ENCRYPTION_KEY: Buffer.alloc(16).toString('base64'),
+    });
+    expect(() => loadConfig()).toThrow('MASTER_ENCRYPTION_KEY');
+  });
+
+  it('parses ALLOW_PLATFORM_KEY_FALLBACK and keeps the operator key for fallback', () => {
+    Object.assign(process.env, validEnv, { ALLOW_PLATFORM_KEY_FALLBACK: 'true' });
+    const config = loadConfig();
+    expect(config.allowPlatformKeyFallback).toBe(true);
+    expect(config.platformAnthropicKey).toBe('sk-ant-fake-key');
+  });
+
+  it('throws when fallback is enabled but no operator ANTHROPIC_API_KEY is set', () => {
+    const { ANTHROPIC_API_KEY: _, ...rest } = validEnv;
+    Object.assign(process.env, rest, { ALLOW_PLATFORM_KEY_FALLBACK: 'true' });
+    expect(() => loadConfig()).toThrow(/ALLOW_PLATFORM_KEY_FALLBACK/);
   });
 
   it('throws when DATABASE_URL is missing', () => {

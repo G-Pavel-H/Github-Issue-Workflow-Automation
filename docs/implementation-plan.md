@@ -320,27 +320,101 @@ A person installs the GitHub App on a fresh repo, opens an issue, answers at mos
 
 > Deferred beyond the MVP heartbeat. Not blocking the first live demo. To be revisited after a successful end-to-end run.
 
-### Phase 12 — Bring-your-own-key (per-installation credentials)
+### Phase 12 — Bring-your-own Anthropic key (per-installation)
 
-**Goal:** Stop the platform operator from paying for every installation's model and sandbox usage. Each installation supplies its own `ANTHROPIC_API_KEY` (and optionally `E2B_API_KEY`), so inference cost accrues to the party that opened the issue, not to whoever hosts Tsukinome.
+**Goal:** Stop the operator from paying for every installation's *inference*. Each installation supplies **its own Anthropic API key**, collected at install time, so model spend accrues to the party that opened the issue — not to whoever hosts Tsukinome. Inference is the usage-scaling cost; removing it keeps hosting cost flat.
 
-**Why now (context):** As of the MVP, `loadConfig()` reads a single global `ANTHROPIC_API_KEY`/`E2B_API_KEY` from the process environment, and `src/index.ts` constructs one `AnthropicProvider` and one `E2BSandboxProvider` at startup, shared across all installations. That is single-tenant: the host pays for everything. This phase makes credentials per-installation. The existing cost instrumentation (Phase 3) and per-run budget cap are the groundwork — they start metering per installation rather than globally.
+**Scope (decided 2026-07-21):**
+- **BYO: Anthropic only.** Each installation provides its own `ANTHROPIC_API_KEY`.
+- **Operator-owned, NOT BYO: E2B and Neon.** The sandbox and the database stay on the operator and keep working exactly as today (startup singletons from operator env). This is a deliberate non-goal — do not make E2B or the DB per-installation.
+- **Budget:** stays operator-controlled with a sane default (`RUN_BUDGET_USD`) for the MVP. Per-user budget caps are deferred. (With BYO, the cap now protects the *user's* wallet — fine, but not user-configurable yet.)
+
+**Why now (context):** As of the MVP, `loadConfig()` reads one global `ANTHROPIC_API_KEY` and `src/index.ts` constructs a single `AnthropicProvider` at startup, shared across all installations — the host pays for everyone. This phase makes **only the Anthropic credential** per-installation; the `E2BSandboxProvider` and the DB pool are untouched. The existing cost instrumentation (Phase 3) and per-run budget are the groundwork — they start metering per installation.
+
+**Lifecycle:**
+1. **Install →** GitHub redirects the installer to the App's **Setup URL** with the `installation_id` (and an OAuth `code`, since we enable *request user authorization during installation*).
+2. **Setup page** (served by the existing Node server): verify via **GitHub OAuth** that this user actually manages this installation (`GET /user/installations`) → show a form → user pastes their Anthropic key → **validate** it with one cheap Anthropic call → **encrypt** (AES-GCM via `MASTER_ENCRYPTION_KEY`) → store keyed by `installation_id`. The page is re-visitable to rotate/replace the key.
+3. **Run time:** resolve the Anthropic key by the run's `installation_id` and build that run's `AnthropicProvider`. E2B + Neon from operator env, unchanged.
+4. **No key on file** (e.g. issue opened before setup finished): refuse gracefully with an issue comment linking back to the setup page — never silently fall back.
+5. **Uninstall:** the `installation.deleted` webhook purges the stored key.
 
 **Build:**
-- **Secret storage:** a per-installation credentials table (reuse the existing Postgres), keyed by `installationId`, with the API keys encrypted at rest. Introduce a `MASTER_ENCRYPTION_KEY` env var for envelope encryption; never store plaintext keys or log them.
-- **Key intake:** a way for an installer to submit their key without it touching an agent or a commit. Decide between (a) a minimal settings page served by the existing server (post-install redirect → form → encrypted write), or (b) reading a designated repo/org secret. Option (a) is the recommended default; capture the decision here before building.
-- **Per-run credential resolution:** move `new AnthropicProvider(...)` / `new E2BSandboxProvider(...)` out of startup and into per-run construction, resolving the key from the run's `installationId` via the store. The provider interfaces do not change — only where/when they are instantiated and where the key comes from.
-- **Fallback / gating policy:** if an installation has no key on file, refuse gracefully with an issue comment explaining how to add one (mirrors the unsupported-language gate) — do **not** silently fall back to a platform key. Optionally support an operator-provided default key behind an explicit `ALLOW_PLATFORM_KEY_FALLBACK` flag for single-tenant/self-host use.
-- **Security:** treat stored keys under the same untrusted-input and least-privilege invariants; redact them from logs and error surfaces; rotate/revoke path (delete on uninstall via the `installation.deleted` webhook).
-- **Tests (dogfood TDD):** fake secret store with encrypt/decrypt round-trip; per-run resolution picks the right installation's key; missing-key path refuses without spending tokens; uninstall purges stored secrets.
+- **Secret storage:** a per-installation credentials table (reuse Postgres), keyed by `installation_id`, Anthropic key **encrypted at rest** (AES-256-GCM; store ciphertext + iv + auth tag). New `MASTER_ENCRYPTION_KEY` env var. Never store plaintext, never log the key.
+- **Setup page + OAuth (the main new surface):** Tsukinome's first user-facing web UI and OAuth flow. Routes on the existing server for the setup redirect, the OAuth callback, and the encrypted write. Verify installation ownership before accepting a key. Validate the key against Anthropic before storing (catch typos at the form, not mid-run).
+- **Per-run Anthropic resolution:** move `new AnthropicProvider(...)` from startup into per-run construction, resolving the key from the run's `installation_id` via the store. `AnthropicProvider`'s interface does not change — only where/when it's built. **E2B and the DB pool stay as-is.**
+- **Gating + fallback:** no key on file → refuse before any model call (mirrors the unsupported-language gate). Keep an operator default behind an explicit `ALLOW_PLATFORM_KEY_FALLBACK` flag (operator env `ANTHROPIC_API_KEY`) for self-host and the operator's own dogfooding repos.
+- **Security:** treat stored keys under the least-privilege + untrusted-input invariants; redact from logs and error surfaces; the OAuth step is what prevents someone configuring an installation they don't own; purge on uninstall.
+- **Tests (dogfood TDD):** fake secret store with encrypt/decrypt round-trip; OAuth ownership check rejects a non-manager; per-run resolution picks the right installation's key; missing-key path refuses without spending tokens; fallback flag path; uninstall purges the secret.
 
 **Exit criteria:**
-- Two installations with different keys run concurrently, each billed to its own key; no cross-tenant leakage.
+- Two installations with different keys run concurrently, each billed to its own Anthropic key; no cross-tenant leakage.
+- The setup page accepts a key only from a verified installation manager, validates it, and stores it encrypted.
 - An installation with no key on file is refused gracefully with clear guidance, before any model call.
 - Keys are encrypted at rest, never logged, and purged on uninstall.
-- Single-tenant/self-host still works via the explicit platform-key fallback flag.
+- Self-host/operator dogfooding still works via `ALLOW_PLATFORM_KEY_FALLBACK`.
+- E2B, the DB, and the budget cap behave exactly as before (operator-owned).
 
-**Open decisions (resolve before implementing):** key-intake mechanism (settings page vs repo secret); whether E2B is also BYO or stays platform-provided; whether to add usage metering/billing on top (separate phase).
+**Deferred (not this phase):** BYO E2B; per-user budget caps; usage metering/billing; org-level (vs per-installation) key sharing.
+
+**Delivery — split into two sub-phases (decided 2026-07-21), one branch/PR each** (like Phase 13):
+
+#### Phase 12a — storage + per-run resolution + gating (no web UI) ✅
+
+The fully unit-testable core: encrypted per-installation secret storage, per-run Anthropic
+provider resolution keyed by `installation_id`, the no-key refusal gate, and the operator
+fallback flag. No user-facing web surface (that's 12b). E2B and the DB pool are untouched.
+
+- **Built:**
+  - **Crypto** (`src/secrets/crypto.ts`): AES-256-GCM `encryptSecret`/`decryptSecret` (96-bit
+    random IV per message + 128-bit auth tag → confidential *and* tamper-evident) + `parseMasterKey`
+    (base64 → validated 32-byte key, throws at startup on wrong length). Plaintext is never logged
+    or persisted — only the `{ciphertext, iv, authTag}` triple.
+  - **Credential vault** (`src/secrets/credential-vault.ts`): composes the `Store` (dumb byte
+    persistence) with the crypto layer so callers deal only in plaintext keys —
+    `setAnthropicKey`/`getAnthropicKey`/`purge`. Used by the resolver now and by the 12b setup page.
+  - **Secret storage** (migration `009_installation_credentials.sql` + 3 `Store` methods on **both**
+    `PgStore` and `InMemoryStore`): `installation_credentials` keyed by `installation_id` (PK),
+    `bytea` ciphertext/iv/auth-tag columns; upsert = rotation, delete = uninstall purge. Just a new
+    table on the existing pool — the DB wiring is unchanged.
+  - **Per-run provider resolution** (`src/llm/provider-resolver.ts`): `ProviderResolver =
+    (installationId) => Promise<LlmProvider>`. `buildProviderResolver` resolves the installation's
+    own stored key → (if `allowPlatformFallback`) the operator platform key → else throws
+    `MissingInstallationKeyError`. Resolving **per call** (not once at startup) means a rotated key
+    takes effect next call and two installations never share a provider. The factory is injected
+    (prod: `(key) => new AnthropicProvider(key)`) so the resolver module stays SDK-free.
+  - **Gateway** (`src/llm/gateway.ts`): now resolves the provider from `run.installationId` **before**
+    `createMessage`/`recordLlmCall`, so a missing key refuses before any spend. The constructor
+    accepts `LlmProvider | ProviderResolver` (a fixed provider is wrapped as a constant resolver),
+    so the ~25 existing call-sites are behaviour-identical — the existing suite is the neutrality guard.
+  - **Central refusal** (`src/worker/worker.ts`): `MissingInstallationKeyError` is terminal, not
+    retryable — one central catch in `processNextJob` posts clear "add your Anthropic key" guidance,
+    fails the run, and marks the job done (no backoff loop). Covers all handlers uniformly.
+  - **Config** (`src/config.ts`): `MASTER_ENCRYPTION_KEY` now **required** (validated to 32 bytes);
+    `ANTHROPIC_API_KEY` now **optional** (`platformAnthropicKey` — pure-BYO deploys need none);
+    `ALLOW_PLATFORM_KEY_FALLBACK` flag (errors if on without an operator key).
+  - **Wiring** (`src/index.ts`): build vault → resolver → gateway. `E2BSandboxProvider` and
+    `createPool` construction are left exactly as-is.
+- **TDD (all CI-tested with fakes):** crypto round-trip / fresh-IV / tamper + wrong-key rejection /
+  master-key validation; vault ciphertext-at-rest / rotation / isolation / purge; resolver picks the
+  right installation's key + fallback on/off + missing-key refusal; gateway resolves per-run and
+  refuses with no spend; the worker's terminal graceful refusal; config's new required/optional vars.
+  Migration 009 + the 3 bytea round-trip store methods are a gated PgStore test (`skipIf(!DATABASE_URL)`),
+  same posture as the other PgStore SQL. Full suite **258 pass / 24 skipped**, typecheck + lint clean.
+- **Operator/dogfooding migration:** keep today's behaviour by setting `ALLOW_PLATFORM_KEY_FALLBACK=true`
+  + keeping `ANTHROPIC_API_KEY`; every operator must now also set `MASTER_ENCRYPTION_KEY`
+  (`openssl rand -base64 32`). (`.env.example` stays absent, as since Phase 2.)
+- **Held for 12b:** the OAuth setup page + GitHub ownership verification, validating a pasted key
+  against Anthropic, and wiring the actual `installation.deleted` webhook to `vault.purge` (12a built +
+  unit-tested the purge *mechanism*; 12b connects the webhook). No auto-resume — a missing-key refusal
+  is terminal for the run; re-trigger after setup.
+
+#### Phase 12b — OAuth setup page (the new web surface)
+
+Serve the Setup URL redirect + GitHub OAuth callback on the existing server; verify via OAuth that
+the user manages the installation (`GET /user/installations`) before accepting a key; validate the
+pasted key against Anthropic; encrypt + store (via the 12a vault); re-visitable to rotate; wire the
+`installation.deleted` webhook to `vault.purge`. Exit = a verified installation manager can set/rotate
+their key, an unauthorized user is rejected, and a real run uses the stored key.
 
 ### Phase 13 — Multi-language support (beyond TypeScript/JavaScript)
 
@@ -383,3 +457,28 @@ Add the Python pack (pip/pytest, its test conventions + source extensions + sand
 - **Sandbox image is the remaining ops step:** the E2B template must carry Python 3 + pip (one multi-toolchain image; the per-pack `sandboxTemplate` override is reserved, unused).
 
 **Open questions (to review with Claude Code CLI):** ~~which language to do first~~ **Python** (decided 2026-07-20); per-language sandbox templates vs one multi-toolchain image (leaning one multi-toolchain image for the MVP); how much the test-first loop's grain needs to change per ecosystem (test conventions differ a lot); interaction with the TDD-gate policy work (some ecosystems/issues may fit "direct" better than strict red→green).
+
+### Phase 14 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
+
+**The problem we're solving:** After Phase 13, adding each new language (Java/Maven-or-Gradle, C#/dotnet, Go, Rust…) means building and maintaining a full **auto-detecting** language pack — heuristics for that ecosystem's manifests, install/test commands, test conventions, and edge cases. That's real per-language overhead, and detection is exactly where the ambiguity lives (Maven vs Gradle, monorepos, non-standard test scripts). We want a way to support more languages **without** writing bespoke detection for each — and to let any repo remove the guessing entirely when it wants to.
+
+**The idea:** let a repo *declare* its toolchain in an optional root config file (e.g. `.tsukinome/config.yml`) — the install/test commands, and the language/runtime. When present, Tsukinome uses it verbatim instead of detecting. This does two things at once: it removes guesswork for repos that opt in, and it becomes the **low-overhead expansion path** — a declared config can drive a language *before* (or instead of) a full auto-detect pack exists, so breadth of language support stops being gated on us writing detection code for every ecosystem.
+
+**Keep the core promise:** it must be **recommended, not obligated.** Tsukinome's headline is "installable with no required config files," so the file is an *override*, never a requirement — auto-detection (Phase 13 packs) stays the default. This sits at the top of a precedence chain, it does not replace detection:
+1. Repo has `.tsukinome/config.yml` → use its declared commands/runtime verbatim.
+2. Else → auto-detect via the Phase 13 language packs.
+3. Else → refuse gracefully, as today.
+
+**Ideas for the solution (to refine — not final technical decisions):**
+- **It populates the existing `Toolchain`, doesn't reinvent it.** The config just fills in `{ language, installCmd, testCmd, testFileConventions, sourceExts, sandboxTemplate }` explicitly — the same shape Phase 13a introduced. So this is a new *resolver* at the front of `detectToolchain`, not a new execution path.
+- **Minimal schema.** Start tiny: `language` (selects the sandbox runtime/image + source extensions), `install`, `test`, optionally `build` and `testGlobs`. Resist config sprawl; everything optional beyond `language` + `test`.
+- **A "declared/generic" pack** for languages with no first-class pack yet: if the config names a language we don't have a pack for but the sandbox image can run its commands, we can still execute — this is the overhead-free breadth lever. Decide how far to allow this vs. requiring a known runtime.
+- **Convention & discovery:** `.tsukinome/config.yml` reuses the existing `.tsukinome/` namespace (where spec/plan artifacts already live) — discoverable and grouped. Read it from the clone at intake, alongside language detection.
+- **Runtime still gates the image.** A declared `test:` command only works if the sandbox image has that runtime — so the `language`/runtime field selects the image (or refuses if unavailable). Declaring commands doesn't conjure a JDK into the sandbox.
+- **Validation & caps:** parse defensively (it's user YAML), bound command length/count, surface a clear error comment on a malformed config rather than failing mid-run.
+
+**Security note (carry the invariant):** the declared commands are repo-supplied and *executed*, which looks like it crosses the "repo content is data, never instructions" line — but it does not change the trust posture. Tsukinome **already** runs arbitrary repo code in the sandbox (the repo's own test script); a declared `test:` is no more dangerous. What keeps it safe is the existing isolation: these commands run **only inside the ephemeral E2B microVM**, with a read-only single-repo clone token, torn down after — never on the host, never with the write token, and they must **never** influence host-side logic (the deterministic Integrator, the orchestrator state machine). Keep that wall absolute.
+
+**Rough exit criteria:** a repo with a valid `.tsukinome/config.yml` runs issue → test-first PR using the declared commands, with no auto-detection involved; a repo without the file behaves exactly as Phase 13 (detection default); a malformed config produces a clear refusal comment, not a crash; declared commands run only in the sandbox.
+
+**Open questions (to review with Claude Code CLI):** file format (YAML vs TOML vs JSON); how much a declared config alone can enable a language with no pack (generic runtime vs known-runtime-only); monorepo / per-directory or per-package configs; precedence when both a config file *and* a detectable pack exist (config wins — confirm); whether to also allow declaring the `build` step and lint for richer verification.

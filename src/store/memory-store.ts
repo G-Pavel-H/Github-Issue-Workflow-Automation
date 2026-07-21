@@ -22,7 +22,9 @@ import {
   type Task,
   type TestRun,
   type UpdateTaskInput,
+  type UpsertInstallationCredentialInput,
 } from './types.js';
+import type { EncryptedSecret } from '../secrets/crypto.js';
 
 function runKeyOf(key: RunKey): string {
   return `${key.installationId}/${key.owner}/${key.repo}/${key.issueNumber}`;
@@ -56,6 +58,7 @@ export class InMemoryStore implements Store {
   private llmCalls: LlmCall[] = [];
   private artifacts: Artifact[] = [];
   private tasks: Task[] = [];
+  private credentials = new Map<number, EncryptedSecret>();
   private nextJobId = 1;
   private nextRunId = 1;
   private nextTestRunId = 1;
@@ -283,6 +286,29 @@ export class InMemoryStore implements Store {
     if (patch.redObserved !== undefined) task.redObserved = patch.redObserved;
     if (patch.greenObserved !== undefined) task.greenObserved = patch.greenObserved;
     if (patch.commitSha !== undefined) task.commitSha = patch.commitSha;
+  }
+
+  async upsertInstallationCredential(input: UpsertInstallationCredentialInput): Promise<void> {
+    // Copy the buffers so later mutations by the caller can't corrupt stored state.
+    this.credentials.set(input.installationId, {
+      ciphertext: Buffer.from(input.ciphertext),
+      iv: Buffer.from(input.iv),
+      authTag: Buffer.from(input.authTag),
+    });
+  }
+
+  async getInstallationCredential(installationId: number): Promise<EncryptedSecret | null> {
+    const secret = this.credentials.get(installationId);
+    if (!secret) return null;
+    return {
+      ciphertext: Buffer.from(secret.ciphertext),
+      iv: Buffer.from(secret.iv),
+      authTag: Buffer.from(secret.authTag),
+    };
+  }
+
+  async deleteInstallationCredential(installationId: number): Promise<void> {
+    this.credentials.delete(installationId);
   }
 
   /** Test-only inspection helper (not part of the Store contract). */

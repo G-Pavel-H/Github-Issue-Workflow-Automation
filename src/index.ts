@@ -9,6 +9,8 @@ import { createProbotGitHubClient } from './github/client.js';
 import { E2BSandboxProvider } from './sandbox/e2b-sandbox.js';
 import { AnthropicProvider } from './llm/anthropic-provider.js';
 import { LlmGateway } from './llm/gateway.js';
+import { buildProviderResolver } from './llm/provider-resolver.js';
+import { CredentialVault } from './secrets/credential-vault.js';
 import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
 import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
 import { cloneToTempDir } from './index/checkout.js';
@@ -36,7 +38,16 @@ async function main() {
 
   const github = createProbotGitHubClient(probot);
   const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey, config.e2bTemplate, log);
-  const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, log);
+  // Phase 12: resolve each run's Anthropic provider from its installation's stored key.
+  // E2B and the DB pool remain operator-owned singletons, unchanged.
+  const vault = new CredentialVault(store, config.masterEncryptionKey);
+  const resolveProvider = buildProviderResolver({
+    vault,
+    factory: (apiKey) => new AnthropicProvider(apiKey),
+    allowPlatformFallback: config.allowPlatformKeyFallback,
+    platformKey: config.platformAnthropicKey,
+  });
+  const gateway = new LlmGateway(resolveProvider, store, log);
   const codeIndex = new PgVectorCodeIndex(
     pool,
     new SidecarEmbeddingProvider({ python: config.cocoindexPython }),

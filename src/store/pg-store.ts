@@ -21,7 +21,9 @@ import type {
   Task,
   TestRun,
   UpdateTaskInput,
+  UpsertInstallationCredentialInput,
 } from './types.js';
+import type { EncryptedSecret } from '../secrets/crypto.js';
 import { DEFAULT_JOB_LEASE_MS, computeBackoffMs } from '../worker/retry.js';
 import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
 
@@ -425,5 +427,40 @@ export class PgStore implements Store {
     if (patch.commitSha !== undefined) add('commit_sha', patch.commitSha);
     if (sets.length === 0) return;
     await this.pool.query(`UPDATE tasks SET ${sets.join(', ')} WHERE id = $1`, [taskId, ...values]);
+  }
+
+  async upsertInstallationCredential(input: UpsertInstallationCredentialInput): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO installation_credentials
+         (installation_id, anthropic_key_ciphertext, anthropic_key_iv, anthropic_key_auth_tag)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (installation_id)
+       DO UPDATE SET anthropic_key_ciphertext = EXCLUDED.anthropic_key_ciphertext,
+                     anthropic_key_iv = EXCLUDED.anthropic_key_iv,
+                     anthropic_key_auth_tag = EXCLUDED.anthropic_key_auth_tag,
+                     updated_at = now()`,
+      [input.installationId, input.ciphertext, input.iv, input.authTag],
+    );
+  }
+
+  async getInstallationCredential(installationId: number): Promise<EncryptedSecret | null> {
+    const { rows } = await this.pool.query(
+      `SELECT anthropic_key_ciphertext, anthropic_key_iv, anthropic_key_auth_tag
+         FROM installation_credentials WHERE installation_id = $1`,
+      [installationId],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ciphertext: row.anthropic_key_ciphertext as Buffer,
+      iv: row.anthropic_key_iv as Buffer,
+      authTag: row.anthropic_key_auth_tag as Buffer,
+    };
+  }
+
+  async deleteInstallationCredential(installationId: number): Promise<void> {
+    await this.pool.query('DELETE FROM installation_credentials WHERE installation_id = $1', [
+      installationId,
+    ]);
   }
 }

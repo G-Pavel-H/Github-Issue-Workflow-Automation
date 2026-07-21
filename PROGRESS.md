@@ -16,7 +16,9 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 9 — Reviewer & Integrator → Pull Request  ← MVP heartbeat ✅
 - [x] Phase 10 — PR comment → fix loop (bounded)
 - [x] Phase 11 — Reliability, security, easy install  ← MVP done ✅
-- [ ] Phase 12 — Bring-your-own-key  (skipped for now — deferred)
+- [~] Phase 12 — Bring-your-own Anthropic key
+  - [x] Phase 12a — storage + per-run resolution + gating (no web UI)
+  - [ ] Phase 12b — OAuth setup page (the new web surface)
 - [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
 - [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
 
@@ -389,10 +391,46 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 - Per `CLAUDE.md`, `docs/implementation-plan.md` was **not** modified (Phase 12 / BYO-key stays
   deferred). This was go-live, not a new build phase.
 
+## Decision log (continued)
+
+- 2026-07-21 (Phase 12a): **Bring-your-own Anthropic key — the unit-testable core (no web UI).**
+  Each installation now bills its *own* Anthropic key; E2B and the DB pool stay operator-owned,
+  untouched. Split Phase 12 into 12a (this) + 12b (OAuth setup page).
+  - **The seam is the gateway.** `LlmGateway.call` already loads the run (for the budget pre-check),
+    so `run.installationId` is in hand at the single instrumented chokepoint — per-run provider
+    resolution slots in there with **no handler/tdd call-site changes**. Alternatives (per-job gateway
+    construction in the worker / threading a provider through every handler) were rejected as messier
+    and against the "gateway is the single chokepoint" decision.
+  - **AES-256-GCM at rest** (`src/secrets/crypto.ts`): 96-bit random IV per message + 128-bit auth tag
+    → confidential + tamper-evident; only `{ciphertext, iv, authTag}` is persisted, never plaintext.
+    `MASTER_ENCRYPTION_KEY` (base64) validated to 32 bytes at startup. `CredentialVault`
+    (`src/secrets/credential-vault.ts`) composes the Store + crypto so callers use plaintext only.
+  - **Store stays dumb** — `installation_credentials` (migration 009, `bytea` columns, PK =
+    installation_id; upsert = rotation, delete = purge) on both Pg + in-memory stores. Encryption lives
+    in the vault, not the store.
+  - **Resolver** (`src/llm/provider-resolver.ts`) resolves **per call** (rotation-correct; no shared
+    providers): own key → (fallback flag) operator platform key → else `MissingInstallationKeyError`.
+    Factory injected → module is SDK-free, so the gateway stays SDK-free too.
+  - **Refusal is central + terminal.** A missing key isn't transient, so one catch in `processNextJob`
+    posts guidance + fails the run + no retry — instead of mirroring across the 8 per-handler
+    `BudgetExhaustedError` catch sites (budget needs per-handler cleanup; missing-key always means the
+    same thing). Chosen over per-handler handling for DRYness. No auto-resume (deferred, maybe 12b).
+  - **Backwards-compatible gateway constructor** accepts `LlmProvider | ProviderResolver` (fixed
+    provider → wrapped constant resolver), so all ~25 existing gateway constructions are behaviour-
+    identical and untouched — the existing suite is the neutrality guard.
+  - **Config break (intended):** `MASTER_ENCRYPTION_KEY` now required; `ANTHROPIC_API_KEY` now optional
+    (pure-BYO deploys need none). Operator keeps today's behaviour with
+    `ALLOW_PLATFORM_KEY_FALLBACK=true` + the operator `ANTHROPIC_API_KEY`, plus a new
+    `MASTER_ENCRYPTION_KEY`. Deployable; documented in the plan's 12a notes.
+  - **Not verified live** (like every credential/secret path here): the gated PgStore migration-009 +
+    bytea round-trip test runs in CI with `DATABASE_URL`; no live BYO run this session. Verify a real
+    two-installation concurrent run bills to distinct keys once 12b's setup page exists.
+
 ## Session log
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-07-21 | Phase 12a | ✅ Complete (code + CI; live BYO run pending 12b's setup page) | 258 tests pass (24 gated-skipped), typecheck + lint clean. Bring-your-own Anthropic key — the unit-testable core, no web UI. Built AES-256-GCM secret crypto + `CredentialVault`, `installation_credentials` (migration 009, bytea, on both stores), a per-run `ProviderResolver` (own key → operator fallback flag → `MissingInstallationKeyError`) resolved inside the gateway from `run.installationId` before any spend, and a central terminal refusal in the worker (guidance + fail run + no retry). Config: `MASTER_ENCRYPTION_KEY` now required, `ANTHROPIC_API_KEY` optional, `ALLOW_PLATFORM_KEY_FALLBACK` flag. E2B + the DB pool untouched; the ~25 existing gateway constructions are behaviour-identical (compat constructor). Demo: `npx vitest run test/secrets test/llm/provider-resolver.test.ts test/llm/gateway.test.ts test/worker/missing-key.test.ts` — encrypt/decrypt round-trip, per-installation key isolation, missing-key refuses with zero spend, fallback flag path, uninstall purges. Next: 12b — the OAuth setup page + `installation.deleted` webhook wiring.
 - 2026-07-20 | Phase 13b | ✅ Complete (code + CI; live Python run pending a Python sandbox image) | 228 tests pass (23 gated-skipped), typecheck + lint clean. Added the `PYTHON` language pack (pytest/pip, `.py`, pytest conventions) + `promptConventions`/`isTestFile`/`toolchainById` on the toolchain; resolve the pack at intake and persist `context.toolchainId`; thread it through implement/fix/architect/clarifier (sandbox commands, test-conventions probe, example-test discovery + injected conventions, repo-map manifest); widened the code index (sidecar + fake + repo-map dirs) and the example-import extractor to Python; made `agents/test-author.md` language-neutral. Gate now accepts Python (refusal test → Ruby; new test asserts Python persists `toolchainId: 'python'`). Demo: `npx vitest run test/toolchain test/pipeline/tdd.test.ts` — the Python pack drives `pytest`/`pip` and a Python-pack TDD run finds `tests/test_*.py` examples + injects pytest conventions; the TS/JS path is unchanged. Next: build a Python-capable E2B image and verify a real Python issue→PR end to end.
 - 2026-07-20 | Phase 13a | ✅ Complete | 220 tests pass (23 gated-skipped), typecheck + lint clean. Introduced the `Toolchain` abstraction (`src/toolchain/toolchain.ts`) + `typescript-javascript` pack + `toolchainForLanguage`/`detectToolchain` resolvers, routed both sandbox sites + the test-conventions probe through it, and turned the language gate into a capability check — **zero behaviour change** (the existing suite is the neutrality guard). Split Phase 13 into 13a (this) + 13b (Python pack). Demo: `npx vitest run test/toolchain` — the pack encodes the old `npm ci`/`npm test`/vitest-config/`.ts` values; a stand-in Python pack drives `pytest`/`pip` through the sandbox with no `npm`. Next: 13b — the Python language pack.
 - 2026-06-26 | Phase 0 | ✅ Complete | 14 tests pass, lint + typecheck green, `/health` returns 200, Probot webhooks wired + tested, migration harness ready, CI workflow added.

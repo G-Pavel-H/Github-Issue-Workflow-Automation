@@ -34,7 +34,7 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
 
   beforeEach(async () => {
     await pool.query(
-      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls, artifacts, tasks RESTART IDENTITY CASCADE',
+      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls, artifacts, tasks, installation_credentials RESTART IDENTITY CASCADE',
     );
   });
 
@@ -62,6 +62,34 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
     const [first, second] = await Promise.all([store.claimNextJob(), store.claimNextJob()]);
     const ids = [first!.id, second!.id].sort((x, y) => x - y);
     expect(ids).toEqual([a.id, b.id].sort((x, y) => x - y));
+  });
+
+  it('upserts, reads, and deletes an installation credential (bytea round-trip)', async () => {
+    const ciphertext = Buffer.from([1, 2, 3, 4, 5]);
+    const iv = Buffer.from([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    const authTag = Buffer.from([100, 101, 102, 103]);
+
+    expect(await store.getInstallationCredential(7)).toBeNull();
+
+    await store.upsertInstallationCredential({ installationId: 7, ciphertext, iv, authTag });
+    const got = await store.getInstallationCredential(7);
+    expect(got!.ciphertext.equals(ciphertext)).toBe(true);
+    expect(got!.iv.equals(iv)).toBe(true);
+    expect(got!.authTag.equals(authTag)).toBe(true);
+
+    // Rotation: upsert replaces in place, keyed by installation_id.
+    const newCipher = Buffer.from([9, 9, 9]);
+    await store.upsertInstallationCredential({
+      installationId: 7,
+      ciphertext: newCipher,
+      iv,
+      authTag,
+    });
+    expect((await store.getInstallationCredential(7))!.ciphertext.equals(newCipher)).toBe(true);
+
+    // Purge on uninstall.
+    await store.deleteInstallationCredential(7);
+    expect(await store.getInstallationCredential(7)).toBeNull();
   });
 
   it('creates a run once per issue (unique key)', async () => {

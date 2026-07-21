@@ -1,4 +1,5 @@
 import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
+import type { EncryptedSecret } from '../secrets/crypto.js';
 
 /**
  * Run state machine. The full pipeline is enumerated here so transitions are
@@ -283,6 +284,11 @@ export interface UpdateTaskInput {
   commitSha?: string | null;
 }
 
+/** Encrypted per-installation Anthropic key at rest (Phase 12), plus its installation key. */
+export interface UpsertInstallationCredentialInput extends EncryptedSecret {
+  installationId: number;
+}
+
 /** A committed artifact (e.g. the spec) — the source of truth, re-read by later phases. */
 export type ArtifactKind = 'spec' | 'plan';
 
@@ -347,4 +353,10 @@ export interface Store {
   getTasks(runId: number): Promise<Task[]>;
   /** Patch a task's status / TDD observations / commit. */
   updateTask(taskId: number, patch: UpdateTaskInput): Promise<void>;
+  /** Insert-or-replace an installation's encrypted Anthropic key (rotation). */
+  upsertInstallationCredential(input: UpsertInstallationCredentialInput): Promise<void>;
+  /** Fetch an installation's encrypted key at rest, or null if none is on file. */
+  getInstallationCredential(installationId: number): Promise<EncryptedSecret | null>;
+  /** Purge an installation's stored key (on uninstall). No-op if absent. */
+  deleteInstallationCredential(installationId: number): Promise<void>;
 }

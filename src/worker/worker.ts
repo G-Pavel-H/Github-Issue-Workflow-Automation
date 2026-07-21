@@ -1,8 +1,9 @@
 import type { GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
-import type { Job, JobPayload, Store } from '../store/types.js';
+import { RunState, type Job, type JobPayload, type Store } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
+import { MissingInstallationKeyError } from '../llm/provider-resolver.js';
 import type { CodeIndex } from '../index/types.js';
 import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { MAX_JOB_ATTEMPTS, JOB_BACKOFF_BASE_MS, DEFAULT_JOB_LEASE_MS } from './retry.js';
@@ -93,6 +94,38 @@ const DEAD_LETTER_COMMENT =
   "couldn't recover, so I've halted this run to avoid looping. Re-open or re-trigger the " +
   'issue to try again — no partial changes were merged.';
 
+const MISSING_KEY_COMMENT =
+  "🔑 **Tsukinome needs this installation's own Anthropic API key.** I stopped before making " +
+  'any model calls because no key is on file for this installation. Add your Anthropic API key ' +
+  'in the Tsukinome setup page, then re-open or re-trigger this issue to run — no charges were ' +
+  'incurred and no changes were made.';
+
+/**
+ * A missing per-installation key (Phase 12) is not a transient error — retrying won't
+ * conjure a key, so we refuse *terminally*: post clear guidance, fail the run, and mark the
+ * job done (no backoff loop). The gateway guarantees this fires before any model spend.
+ */
+async function refuseForMissingKey(
+  job: Job,
+  err: MissingInstallationKeyError,
+  deps: WorkerDeps,
+): Promise<void> {
+  const coords = issueCoordsFromPayload(job.payload);
+  const run = await deps.store.getRun(coords);
+  if (run) await deps.store.updateRunState(run.id, RunState.Failed);
+  deps.log.warn(
+    { jobId: job.id, type: job.type, installationId: err.installationId },
+    'Refused: no Anthropic key on file for installation',
+  );
+  // Best-effort: a failure to comment must not crash the worker loop.
+  try {
+    await deps.github.postIssueComment({ ...coords, body: MISSING_KEY_COMMENT });
+  } catch (commentErr) {
+    const m = commentErr instanceof Error ? commentErr.message : String(commentErr);
+    deps.log.error({ jobId: job.id, err: m }, 'Failed to post missing-key comment');
+  }
+}
+
 /**
  * Claim and process at most one job. Returns true if a job was handled, false if
  * the queue was empty. A throwing handler is retried with backoff (Phase 11); once
@@ -107,6 +140,12 @@ export async function processNextJob(deps: WorkerDeps): Promise<boolean> {
     await dispatch(job, deps);
     await deps.store.markJobDone(job.id);
   } catch (err) {
+    // A missing per-installation key is terminal, not retryable — refuse gracefully once.
+    if (err instanceof MissingInstallationKeyError) {
+      await refuseForMissingKey(job, err, deps);
+      await deps.store.markJobDone(job.id);
+      return true;
+    }
     const message = err instanceof Error ? err.message : String(err);
     const result = await deps.store.failOrRetryJob(job.id, message, {
       maxAttempts: MAX_JOB_ATTEMPTS,

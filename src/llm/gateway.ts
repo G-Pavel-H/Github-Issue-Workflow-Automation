@@ -10,6 +10,7 @@ import type {
   ToolChoice,
   ToolSpec,
 } from './types.js';
+import { constantProviderResolver, type ProviderResolver } from './provider-resolver.js';
 
 /** Thrown when a run's budget is spent — the orchestrator stops at the next safe point. */
 export class BudgetExhaustedError extends Error {
@@ -46,16 +47,27 @@ export interface GatewayCallResult {
 const DEFAULT_MAX_TOKENS = 4096;
 
 /**
- * The single instrumented chokepoint for all model calls. Resolves the model,
- * enforces the per-run budget, and logs tokens + dollar cost against the run.
- * Never make an uninstrumented model call — always go through here.
+ * The single instrumented chokepoint for all model calls. Resolves the model + the
+ * per-installation provider, enforces the per-run budget, and logs tokens + dollar cost
+ * against the run. Never make an uninstrumented model call — always go through here.
+ *
+ * The provider is resolved per call from the run's `installationId` (Phase 12), so each
+ * installation's spend goes to its own Anthropic key. For convenience/back-compat the
+ * constructor also accepts a fixed `LlmProvider`, which is wrapped as a constant resolver.
  */
 export class LlmGateway {
+  private readonly resolveProvider: ProviderResolver;
+
   constructor(
-    private readonly provider: LlmProvider,
+    providerOrResolver: LlmProvider | ProviderResolver,
     private readonly store: Store,
     private readonly log: Logger,
-  ) {}
+  ) {
+    this.resolveProvider =
+      typeof providerOrResolver === 'function'
+        ? providerOrResolver
+        : constantProviderResolver(providerOrResolver);
+  }
 
   async call(params: GatewayCallParams): Promise<GatewayCallResult> {
     const model = params.model ?? (params.tier ? TIER_MODELS[params.tier] : undefined);
@@ -69,7 +81,11 @@ export class LlmGateway {
       throw new BudgetExhaustedError(params.runId, remainingBefore);
     }
 
-    const response = await this.provider.createMessage({
+    // Resolve the installation's provider *before* spending. A missing key throws
+    // MissingInstallationKeyError here — refusing before any model call or cost record.
+    const provider = await this.resolveProvider(run.installationId);
+
+    const response = await provider.createMessage({
       model,
       system: params.system,
       messages: params.messages,

@@ -1,8 +1,25 @@
+import { parseMasterKey } from './secrets/crypto.js';
+
 export interface Config {
   appId: string;
   privateKey: string;
   webhookSecret: string;
-  anthropicApiKey: string;
+  /**
+   * The operator's platform Anthropic key. Optional under BYO (Phase 12): pure-BYO deploys
+   * need none. Used *only* when `allowPlatformKeyFallback` is true (self-host / dogfooding).
+   */
+  platformAnthropicKey?: string;
+  /**
+   * 32-byte AES-256 key (base64-decoded) used to encrypt per-installation Anthropic keys at
+   * rest. Required — a misconfigured length throws at startup (see `parseMasterKey`).
+   */
+  masterEncryptionKey: Buffer;
+  /**
+   * When true, an installation with no key on file falls back to the operator's platform key
+   * (requires `platformAnthropicKey`). Off by default — missing keys are refused, never
+   * silently billed to the operator.
+   */
+  allowPlatformKeyFallback: boolean;
   databaseUrl: string;
   e2bApiKey: string;
   /**
@@ -40,10 +57,15 @@ const REQUIRED_VARS = [
   'APP_ID',
   'PRIVATE_KEY',
   'WEBHOOK_SECRET',
-  'ANTHROPIC_API_KEY',
   'DATABASE_URL',
   'E2B_API_KEY',
+  'MASTER_ENCRYPTION_KEY',
 ] as const;
+
+/** Truthy env flag: "1"/"true"/"yes" (case-insensitive) → true; anything else → false. */
+function parseBool(raw: string | undefined): boolean {
+  return ['1', 'true', 'yes'].includes((raw ?? '').trim().toLowerCase());
+}
 
 export function loadConfig(): Config {
   const missing = REQUIRED_VARS.filter((key) => !process.env[key]);
@@ -51,11 +73,22 @@ export function loadConfig(): Config {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
+  const platformAnthropicKey = process.env.ANTHROPIC_API_KEY?.trim() || undefined;
+  const allowPlatformKeyFallback = parseBool(process.env.ALLOW_PLATFORM_KEY_FALLBACK);
+  if (allowPlatformKeyFallback && !platformAnthropicKey) {
+    throw new Error(
+      'ALLOW_PLATFORM_KEY_FALLBACK is enabled but ANTHROPIC_API_KEY (the operator platform key) ' +
+        'is not set — set the operator key or disable the fallback.',
+    );
+  }
+
   return {
     appId: process.env.APP_ID!,
     privateKey: process.env.PRIVATE_KEY!,
     webhookSecret: process.env.WEBHOOK_SECRET!,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+    platformAnthropicKey,
+    masterEncryptionKey: parseMasterKey(process.env.MASTER_ENCRYPTION_KEY!),
+    allowPlatformKeyFallback,
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
     e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
