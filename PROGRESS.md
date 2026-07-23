@@ -24,6 +24,12 @@ Keep this current. It's the source of truth for what's done and what's next.
 
 ## Outstanding issues (revisit before calling go-live done)
 
+- **⏸️ BYO key: live verification pending a deployment (Phase 12).** Code-complete and CI-green, and
+  the setup page was clicked through end to end **locally** (OAuth on `localhost`, key stored,
+  encrypted row in `installation_credentials`). Still unverified: a **second, real installation**
+  storing its own key and a run billing to it, and **two installations with different keys running
+  concurrently without cross-tenant leakage** (the phase's headline exit criterion). Both need a
+  public `SETUP_BASE_URL` — i.e. a deployed host — since a real user's browser can't reach localhost.
 - **⏸️ Non-recoverable transient state (reliability).** A non-budget exception thrown *after* the
   `Planning`/`Implementing` transition can't self-recover — the retry is skipped by the
   `state !== <expected>` guard, stranding the run in the transient state. Harden it (reset-to-prior-state
@@ -61,9 +67,11 @@ Keep this current. It's the source of truth for what's done and what's next.
 - Postgres (Neon) + pgvector for state and the code index.
 - CocoIndex sidecar for AST-aware incremental code indexing.
 - E2B ephemeral microVM sandbox for cloning repos and running tests.
-- Anthropic API, model-tiered (Haiku/Sonnet/Opus) with prompt caching.
+- Anthropic API, model-tiered (Haiku/Sonnet/Opus) with prompt caching. **Per-installation key
+  (BYO) as of Phase 12** — the operator's own key is a fallback behind `ALLOW_PLATFORM_KEY_FALLBACK`.
 - Hand-rolled agent runner + role registry; no agent framework.
-- MVP target repos: TypeScript only.
+- Target repos: **TypeScript/JavaScript and Python** (Phase 13b). Languages with no toolchain pack
+  are refused gracefully at the intake gate.
 
 ## Decision log
 
